@@ -1,0 +1,13 @@
+.pio/
+build/
+.generated/
+out/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+include/app_config.generated.h
+__pycache__/
+*.pyc
+vp_cert

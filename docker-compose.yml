@@ -1,0 +1,21 @@
+services:
+  buddy-recv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bambuddy-esp-vp-receiver:latest
+    container_name: bambuddy-esp-vp-receiver
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      BUDDY_RECV_HOST: 0.0.0.0
+      BUDDY_RECV_PORT: "${BUDDY_RECV_PORT:-8001}"
+      BAMBUDDY_URL: "${BAMBUDDY_URL:-http://127.0.0.1:8000}"
+      BAMBUDDY_API_KEY: "${BAMBUDDY_API_KEY:-}"
+      BUDDY_RECV_MAX_UPLOAD_BYTES: "${BUDDY_RECV_MAX_UPLOAD_BYTES:-0}"
+      BUDDY_RECV_PRINTER_ID: "${BUDDY_RECV_PRINTER_ID:-}"
+    volumes:
+      - buddy_recv_tmp:/tmp/bambuddy-esp-vp
+
+volumes:
+  buddy_recv_tmp:
