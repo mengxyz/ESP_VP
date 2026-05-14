@@ -44,7 +44,7 @@ static void write_detect_frame(tls_socket_t *client)
         "{\"login\":{\"bind\":\"free\",\"command\":\"detect\",\"connect\":\"lan\","
         "\"dev_cap\":1,\"id\":\"%s\",\"model\":\"%s\",\"name\":\"%s\","
         "\"sequence_id\":\"20000\",\"version\":\"01.07.00.00\"}}",
-        ESP_VP_SERIAL, APP_VP_MODEL_CODE, APP_VP_NAME);
+        esp_vp_serial(), esp_vp_model_code(), esp_vp_name());
 
     unsigned char frame[576];
     uint16_t total = (uint16_t)(json_len + 6);
@@ -78,6 +78,7 @@ static void bind_task(void *arg)
             continue;
         }
         ESP_LOGI(TAG, "accepted TCP/%d from %s", port, inet_ntoa(peer.sin_addr));
+        status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 900);
         tls_socket_t *sock = calloc(1, sizeof(*sock));
         if (sock == NULL) {
             ESP_LOGW(TAG, "no memory for TCP/%d client", port);

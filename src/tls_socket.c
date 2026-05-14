@@ -5,14 +5,14 @@
 #include "esp_log.h"
 #include "mbedtls/error.h"
 
-#include "app_config.h"
+#include "esp_vp.h"
 #include "tls_socket.h"
 
 static const char *TAG = "tls_socket";
 
 static bool tls_configured(void)
 {
-    return strlen(APP_TLS_CERT_PEM) > 0 && strlen(APP_TLS_KEY_PEM) > 0;
+    return strlen(esp_vp_tls_cert_pem()) > 0 && strlen(esp_vp_tls_key_pem()) > 0;
 }
 
 static void log_mbedtls_error(const char *what, int ret)
@@ -52,7 +52,9 @@ esp_err_t tls_socket_init(tls_socket_t *sock, int fd, bool enable_tls)
     mbedtls_pk_init(&sock->key);
     sock->net.fd = fd;
 
-    int ret = mbedtls_x509_crt_parse(&sock->cert, (const unsigned char *)APP_TLS_CERT_PEM, strlen(APP_TLS_CERT_PEM) + 1);
+    const char *cert_pem = esp_vp_tls_cert_pem();
+    const char *key_pem = esp_vp_tls_key_pem();
+    int ret = mbedtls_x509_crt_parse(&sock->cert, (const unsigned char *)cert_pem, strlen(cert_pem) + 1);
     if (ret != 0) {
         log_mbedtls_error("x509_crt_parse", ret);
         tls_socket_free_tls(sock, false);
@@ -60,8 +62,8 @@ esp_err_t tls_socket_init(tls_socket_t *sock, int fd, bool enable_tls)
     }
     ret = mbedtls_pk_parse_key(
         &sock->key,
-        (const unsigned char *)APP_TLS_KEY_PEM,
-        strlen(APP_TLS_KEY_PEM) + 1,
+        (const unsigned char *)key_pem,
+        strlen(key_pem) + 1,
         NULL,
         0);
     if (ret != 0) {

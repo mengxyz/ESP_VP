@@ -17,14 +17,17 @@ static char s_local_ip[16] = "0.0.0.0";
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGW(TAG, "disconnected, reconnecting");
+        status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         snprintf(s_local_ip, sizeof(s_local_ip), IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&event->ip_info.ip));
+        status_led_set(ESP_VP_STATUS_READY);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -54,6 +57,10 @@ esp_err_t wifi_start(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    esp_err_t tx_power_err = esp_wifi_set_max_tx_power(52); /* 13 dBm, lower peak current during association. */
+    if (tx_power_err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to limit TX power: %s", esp_err_to_name(tx_power_err));
+    }
     ESP_ERROR_CHECK(esp_wifi_start());
 
     xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);

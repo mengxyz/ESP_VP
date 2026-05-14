@@ -10,12 +10,19 @@ services:
     environment:
       BUDDY_RECV_HOST: 0.0.0.0
       BUDDY_RECV_PORT: "${BUDDY_RECV_PORT:-8001}"
+      BUDDY_RECV_DATA_DIR: /data
       BAMBUDDY_URL: "${BAMBUDDY_URL:-http://127.0.0.1:8000}"
       BAMBUDDY_API_KEY: "${BAMBUDDY_API_KEY:-}"
+      BAMBUDDY_BEARER_TOKEN: "${BAMBUDDY_BEARER_TOKEN:-}"
+      BAMBUDDY_USERNAME: "${BAMBUDDY_USERNAME:-}"
+      BAMBUDDY_PASSWORD: "${BAMBUDDY_PASSWORD:-}"
       BUDDY_RECV_MAX_UPLOAD_BYTES: "${BUDDY_RECV_MAX_UPLOAD_BYTES:-0}"
       BUDDY_RECV_PRINTER_ID: "${BUDDY_RECV_PRINTER_ID:-}"
+      BUDDY_RECV_LIBRARY_FOLDER_ID: "${BUDDY_RECV_LIBRARY_FOLDER_ID:-}"
+      BUDDY_RECV_FORWARD_MODE: "${BUDDY_RECV_FORWARD_MODE:-library}"
+      BUDDY_RECV_ENROLLMENT_KEY: "${BUDDY_RECV_ENROLLMENT_KEY:-}"
     volumes:
-      - buddy_recv_tmp:/tmp/bambuddy-esp-vp
+      - buddy_recv_data:/data
 
 volumes:
-  buddy_recv_tmp:
+  buddy_recv_data:

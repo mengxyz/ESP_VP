@@ -1,18 +1,28 @@
 idf_component_register(
     SRCS
         "main.c"
+        "status_led.c"
+        "pair_button.c"
         "wifi.c"
         "ssdp.c"
         "bind_server.c"
         "mqtt_server.c"
+        "management_server.c"
+        "device_config.c"
+        "proxy_status.c"
         "stream_upload.c"
         "tls_socket.c"
         "ftps_server.c"
     INCLUDE_DIRS "../include"
     REQUIRES
+        app_update
         esp_wifi
         esp_netif
         esp_event
+        esp_timer
         nvs_flash
+        esp_http_client
         mbedtls
+        esp_driver_rmt
+        esp_driver_gpio
 )

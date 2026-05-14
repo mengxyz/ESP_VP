@@ -17,6 +17,21 @@
 #ifndef APP_BAMBUDDY_API_KEY
 #define APP_BAMBUDDY_API_KEY ""
 #endif
+#ifndef APP_MANAGER_MODE
+#define APP_MANAGER_MODE 0
+#endif
+#ifndef APP_ESP_VP_FIRMWARE_VERSION
+#define APP_ESP_VP_FIRMWARE_VERSION "esp-vp-manager-discovery-2026-06-24"
+#endif
+#ifndef APP_RECEIVER_ENROLLMENT_KEY
+#define APP_RECEIVER_ENROLLMENT_KEY APP_BAMBUDDY_API_KEY
+#endif
+#ifndef APP_STATUS_LED_PIN
+#define APP_STATUS_LED_PIN -1
+#endif
+#ifndef APP_PAIR_BUTTON_PIN
+#define APP_PAIR_BUTTON_PIN 0
+#endif
 #ifndef APP_VP_NAME
 #define APP_VP_NAME "Bambuddy ESP VP"
 #endif

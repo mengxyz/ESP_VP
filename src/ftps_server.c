@@ -6,12 +6,14 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -20,6 +22,7 @@
 #include "tls_socket.h"
 
 static const char *TAG = "ftps";
+static int s_next_passive_port = ESP_VP_FTPS_PASSIVE_PORT;
 
 typedef struct {
     tls_socket_t control;
@@ -55,6 +58,14 @@ static int make_listener(int port, int backlog)
     return sock;
 }
 
+static void set_nonblocking(int sock)
+{
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    }
+}
+
 static void close_passive(ftp_session_t *session)
 {
     if (session->passive_listener >= 0) {
@@ -64,39 +75,59 @@ static void close_passive(ftp_session_t *session)
     }
 }
 
+static int open_next_passive_listener(int *port)
+{
+    for (int attempt = 0; attempt < ESP_VP_FTPS_PASSIVE_PORT_COUNT; attempt++) {
+        int candidate = s_next_passive_port;
+        s_next_passive_port++;
+        if (s_next_passive_port >= ESP_VP_FTPS_PASSIVE_PORT + ESP_VP_FTPS_PASSIVE_PORT_COUNT) {
+            s_next_passive_port = ESP_VP_FTPS_PASSIVE_PORT;
+        }
+
+        int listener = make_listener(candidate, 1);
+        if (listener >= 0) {
+            *port = candidate;
+            return listener;
+        }
+        ESP_LOGW(TAG, "passive port %d unavailable errno=%d", candidate, errno);
+    }
+    return -1;
+}
+
 static void handle_pasv(ftp_session_t *session)
 {
     close_passive(session);
-    session->passive_listener = make_listener(ESP_VP_FTPS_PASSIVE_PORT, 1);
+    int passive_port = 0;
+    session->passive_listener = open_next_passive_listener(&passive_port);
     if (session->passive_listener < 0) {
         ftp_send(&session->control, 425, "Cannot open passive listener");
         return;
     }
-    session->passive_port = ESP_VP_FTPS_PASSIVE_PORT;
+    session->passive_port = passive_port;
 
-    /* The slicer connects back to the same IP it used for the control channel.
-     * 0,0,0,0 is accepted by Bambu/Orca when the control peer supplies the IP.
-     */
-    int p1 = ESP_VP_FTPS_PASSIVE_PORT / 256;
-    int p2 = ESP_VP_FTPS_PASSIVE_PORT % 256;
-    char msg[96];
-    snprintf(msg, sizeof(msg), "Entering Passive Mode (0,0,0,0,%d,%d)", p1, p2);
+    int ip1 = 0;
+    int ip2 = 0;
+    int ip3 = 0;
+    int ip4 = 0;
+    if (sscanf(wifi_local_ip(), "%d.%d.%d.%d", &ip1, &ip2, &ip3, &ip4) != 4) {
+        ip1 = 0;
+        ip2 = 0;
+        ip3 = 0;
+        ip4 = 0;
+    }
+    int p1 = session->passive_port / 256;
+    int p2 = session->passive_port % 256;
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Entering Passive Mode (%d,%d,%d,%d,%d,%d)", ip1, ip2, ip3, ip4, p1, p2);
     ftp_send(&session->control, 227, msg);
+    ESP_LOGI(TAG, "PASV listening on %s:%d", wifi_local_ip(), session->passive_port);
 }
 
 static void handle_epsv(ftp_session_t *session)
 {
     close_passive(session);
-    session->passive_listener = make_listener(ESP_VP_FTPS_PASSIVE_PORT, 1);
-    if (session->passive_listener < 0) {
-        ftp_send(&session->control, 425, "Cannot open passive listener");
-        return;
-    }
-    session->passive_port = ESP_VP_FTPS_PASSIVE_PORT;
-    char msg[80];
-    snprintf(msg, sizeof(msg), "Entering Extended Passive Mode (|||%d|)", ESP_VP_FTPS_PASSIVE_PORT);
-    ftp_send(&session->control, 229, msg);
-    ESP_LOGI(TAG, "EPSV listening on port %d", ESP_VP_FTPS_PASSIVE_PORT);
+    ftp_send(&session->control, 502, "Use PASV");
+    ESP_LOGI(TAG, "EPSV refused; forcing PASV with explicit LAN address");
 }
 
 static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
@@ -108,14 +139,42 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
 
     ESP_LOGI(TAG, "receiving file: %s from %s", filename, session->source_ip);
     ftp_send(&session->control, 150, "Opening data connection");
+    ESP_LOGI(TAG, "waiting for passive data connection on TCP/%d", session->passive_port);
+
+    set_nonblocking(session->passive_listener);
+    int data_fd = -1;
+    int passive_port = session->passive_port;
+    int64_t deadline_us = esp_timer_get_time() + 20000000;
+    while (esp_timer_get_time() < deadline_us) {
+        struct sockaddr_in data_peer_wait = {0};
+        socklen_t data_peer_wait_len = sizeof(data_peer_wait);
+        data_fd = accept(session->passive_listener, (struct sockaddr *)&data_peer_wait, &data_peer_wait_len);
+        if (data_fd >= 0) {
+            break;
+        }
+        int saved_errno = errno;
+        if (saved_errno != EWOULDBLOCK && saved_errno != EAGAIN) {
+            close_passive(session);
+            ESP_LOGW(TAG, "passive data connection accept failed errno=%d", saved_errno);
+            ftp_send(&session->control, 425, "Data connection failed");
+            return ESP_FAIL;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
     struct sockaddr_in data_peer = {0};
     socklen_t data_peer_len = sizeof(data_peer);
-    int data_fd = accept(session->passive_listener, (struct sockaddr *)&data_peer, &data_peer_len);
-    close_passive(session);
     if (data_fd < 0) {
-        ftp_send(&session->control, 425, "Data connection failed");
+        close_passive(session);
+        ESP_LOGW(TAG, "passive data connection timed out on TCP/%d from control peer %s",
+                 passive_port, session->source_ip);
+        ftp_send(&session->control, 425, "Data connection timed out");
         return ESP_FAIL;
     }
+    if (getpeername(data_fd, (struct sockaddr *)&data_peer, &data_peer_len) != 0) {
+        memset(&data_peer, 0, sizeof(data_peer));
+    }
+    close_passive(session);
     tls_socket_t *data = calloc(1, sizeof(*data));
     if (data == NULL) {
         close(data_fd);
@@ -134,8 +193,11 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     stream_upload_t upload;
     memset(&upload, 0, sizeof(upload));
     if (archive_upload) {
+        status_led_set(ESP_VP_STATUS_UPLOADING);
         esp_err_t begin_err = stream_upload_begin(&upload, filename, session->source_ip);
         if (begin_err != ESP_OK) {
+            status_led_set(ESP_VP_STATUS_READY);
+            status_led_pulse(ESP_VP_STATUS_ERROR, 1600);
             tls_socket_close(data);
             free(data);
             ftp_send(&session->control, 451, "Backend upload failed");
@@ -187,6 +249,14 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     } else if (archive_upload) {
         stream_upload_abort(&upload);
     }
+    if (archive_upload) {
+        status_led_set(ESP_VP_STATUS_READY);
+        if (err == ESP_OK) {
+            status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 1200);
+        } else {
+            status_led_pulse(ESP_VP_STATUS_ERROR, 1800);
+        }
+    }
 
     ESP_LOGI(TAG, "received file complete: %s bytes=%u err=%s archive=%d",
         filename,
@@ -218,6 +288,7 @@ static void ftp_client_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+    status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 900);
 
     bool authed = false;
     char line[256];
@@ -244,12 +315,14 @@ static void ftp_client_task(void *arg)
         if (strcasecmp(line, "USER") == 0) {
             ftp_send(&session->control, strcasecmp(argp, "bblp") == 0 ? 331 : 530, "Password required");
         } else if (strcasecmp(line, "PASS") == 0) {
-            authed = strcmp(argp, APP_VP_ACCESS_CODE) == 0;
+            authed = strcmp(argp, esp_vp_access_code()) == 0;
             ftp_send(&session->control, authed ? 230 : 530, authed ? "Login successful" : "Login incorrect");
             if (authed) {
                 ESP_LOGI(TAG, "FTP login from %s", session->source_ip);
+                status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 1200);
             } else {
                 ESP_LOGW(TAG, "FTP failed login from %s", session->source_ip);
+                status_led_pulse(ESP_VP_STATUS_ERROR, 1200);
             }
         } else if (!authed) {
             ftp_send(&session->control, 530, "Not logged in");

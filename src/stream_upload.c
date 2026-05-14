@@ -6,6 +6,7 @@
 #include "lwip/sockets.h"
 
 #include "app_config.h"
+#include "esp_vp.h"
 #include "stream_upload.h"
 
 static const char *TAG = "stream_upload";
@@ -21,7 +22,7 @@ static esp_err_t parse_upload_url(upload_url_t *out)
     memset(out, 0, sizeof(*out));
     strlcpy(out->port, "80", sizeof(out->port));
 
-    const char *url = APP_BAMBUDDY_BASE_URL;
+    const char *url = esp_vp_upload_base_url();
     const char *cursor = strstr(url, "://");
     if (cursor != NULL) {
         if (strncmp(url, "http://", 7) != 0) {
@@ -135,7 +136,9 @@ static int connect_socket(const upload_url_t *url)
         };
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        ESP_LOGI(TAG, "connecting upload socket to %s:%s", url->host, url->port);
         if (connect(sock, it->ai_addr, it->ai_addrlen) == 0) {
+            ESP_LOGI(TAG, "upload socket connected to %s:%s", url->host, url->port);
             break;
         }
         ESP_LOGE(TAG, "connect failed errno=%d", errno);
@@ -175,7 +178,7 @@ esp_err_t stream_upload_begin(stream_upload_t *upload, const char *filename, con
                        "Connection: close\r\n"
                        "X-Bambuddy-Filename: %s\r\n"
                        "X-Bambuddy-VP-Name: %s\r\n",
-                       url.path, url.host, url.port, upload->filename, APP_VP_NAME);
+                       url.path, url.host, url.port, upload->filename, esp_vp_name());
     if (len < 0 || (size_t)len >= sizeof(headers)) {
         close(sock);
         return ESP_ERR_NO_MEM;
@@ -185,9 +188,13 @@ esp_err_t stream_upload_begin(stream_upload_t *upload, const char *filename, con
         err = append_header(headers, sizeof(headers), &len,
                             "X-Bambuddy-Source-IP: %s\r\n", upload->source_ip);
     }
-    if (err == ESP_OK && strlen(APP_BAMBUDDY_API_KEY) > 0) {
+    if (err == ESP_OK) {
         err = append_header(headers, sizeof(headers), &len,
-                            "X-API-Key: %s\r\n", APP_BAMBUDDY_API_KEY);
+                            "X-Esp-Vp-Device-Id: %s\r\n", esp_vp_device_id());
+    }
+    if (err == ESP_OK && strlen(esp_vp_api_key()) > 0) {
+        err = append_header(headers, sizeof(headers), &len,
+                            "X-API-Key: %s\r\n", esp_vp_api_key());
     }
     if (err == ESP_OK) {
         err = finish_headers(headers, sizeof(headers), &len);
@@ -202,6 +209,7 @@ esp_err_t stream_upload_begin(stream_upload_t *upload, const char *filename, con
         close(sock);
         return err;
     }
+    ESP_LOGI(TAG, "upload headers sent bytes=%d", len);
 
     upload->sock = sock;
     return ESP_OK;
@@ -211,6 +219,10 @@ esp_err_t stream_upload_write(stream_upload_t *upload, const unsigned char *data
 {
     if (upload->sock < 0 || len == 0) {
         return ESP_OK;
+    }
+
+    if (upload->bytes == 0) {
+        ESP_LOGI(TAG, "upload body started first_chunk=%u", (unsigned)len);
     }
 
     char chunk_header[16];
@@ -240,6 +252,7 @@ esp_err_t stream_upload_finish(stream_upload_t *upload)
         return ESP_ERR_INVALID_STATE;
     }
 
+    ESP_LOGI(TAG, "upload body finished bytes=%u; waiting for manager response", (unsigned)upload->bytes);
     esp_err_t err = send_all(upload->sock, "0\r\n\r\n", 5);
     if (err != ESP_OK) {
         close(upload->sock);

@@ -1,15 +1,22 @@
 # ESP32-S3 Virtual Printer Streaming Proxy
 
 `esp-vp/` is a native ESP-IDF 6.0+ firmware project for an ESP32-S3 with PSRAM.
-It presents one archive-only virtual Bambu printer on the LAN and streams slicer
-uploads to Bambuddy at:
+It presents one virtual Bambu printer on the LAN and streams slicer uploads to
+the standalone receiver at:
 
 ```text
 POST /api/v1/esp-vp/upload
 ```
 
+The receiver then forwards the completed `.3mf` to stock Bambuddy's latest
+library upload API:
+
+```text
+POST /api/v1/library/files
+```
+
 The firmware does not mount or write an SD card. FTP `STOR` data is relayed to
-the backend through a raw HTTP/1.1 chunked upload using fixed transfer buffers.
+the receiver through a raw HTTP/1.1 chunked upload using fixed transfer buffers.
 
 ## Current Working Flow
 
@@ -22,25 +29,18 @@ Bambu Studio / OrcaSlicer
   -> uploads .3mf over implicit FTPS
 ESP VP
   -> streams FTP STOR bytes as HTTP chunked upload
-  -> POST /api/v1/esp-vp/upload
-Bambuddy ingest
+  -> buddy_recv POST /api/v1/esp-vp/upload
+buddy_recv
   -> writes a temporary .3mf
-  -> archives it in Bambuddy
+  -> forwards to stock Bambuddy POST /api/v1/library/files
+Bambuddy
+  -> stores it in Library
 ```
 
-There are two supported ingest targets:
-
-- **Built-in Bambuddy route**: use this when your Bambuddy checkout/image
-  includes `POST /api/v1/esp-vp/upload`.
-- **Standalone receiver**: use `buddy_recv.py` when you do not want to rebuild
-  the main Bambuddy image. In that mode the path is:
-
-```text
-ESP -> buddy_recv -> existing Bambuddy host API
-```
-
-The receiver accepts the ESP upload, then forwards the completed `.3mf` to the
-existing Bambuddy archive upload endpoint.
+Latest stock Bambuddy still exposes `POST /api/v1/archives/upload`, but recent
+versions can reject API keys there with `API keys cannot be used for
+administrative operations`. For stock images, keep the receiver in `library`
+mode. Archive and custom ESP ingest modes are compatibility options only.
 
 TLS is capped to TLS 1.2 in the firmware to match the working Bambuddy virtual
 printer behavior used by current slicers.
@@ -64,7 +64,24 @@ The default target is `esp32s3`. `sdkconfig.defaults` is configured for an
 
 ## ESP-IDF 6 Setup
 
-Install ESP-IDF 6.0 or newer, then export the environment before building:
+The build helper can use a project-local ESP-IDF checkout at:
+
+```text
+.tools/esp-idf
+```
+
+If `idf.py` is not available through that checkout, `build.py` will bootstrap it
+inside the project:
+
+1. Clone ESP-IDF from `https://github.com/espressif/esp-idf.git`
+2. Use the default tag/branch `v6.0`
+3. Run ESP-IDF's `install.sh esp32s3`
+4. Run builds through `export.sh` automatically
+
+This does not install ESP-IDF globally. Tool downloads still use Espressif's
+normal installer cache, usually under `~/.espressif`.
+
+You can still install/export ESP-IDF yourself if preferred:
 
 ```bash
 source ~/esp/esp-idf/export.sh
@@ -111,6 +128,17 @@ python3 esp-vp/build.py \
   --bambuddy-url "http://192.168.1.127:8000" \
   --api-key "bb_xxx"
 ```
+
+ESP-IDF bootstrap flags:
+
+```bash
+python3 esp-vp/build.py --model X2D \
+  --idf-path .tools/esp-idf \
+  --idf-version v6.0
+```
+
+Use `--no-idf-bootstrap` when you want the build to fail instead of cloning or
+installing SDK tools automatically.
 
 If `--model` is omitted, the script shows a multi-model picker in interactive
 terminals. You can select comma-separated indexes/codes/names, or `all`.
@@ -169,18 +197,35 @@ discovery packet.
 
 ## Standalone Receiver
 
-If your running Bambuddy image does not include `POST /api/v1/esp-vp/upload`,
-run the standalone receiver beside it instead of rebuilding the image. The ESP
-uploads to this receiver, and the receiver forwards the completed `.3mf` to the
-existing Bambuddy archive API (`POST /api/v1/archives/upload`).
+Run the standalone receiver beside Bambuddy when you want the ESP to upload to a
+small sidecar instead of directly to the main Bambuddy process. The ESP uploads
+to this receiver, and the receiver forwards the completed `.3mf` to Bambuddy.
+
+The default forwarding mode is `library`, which uses the stock latest Bambuddy
+API:
+
+```text
+POST /api/v1/library/files
+```
+
+This avoids a custom Bambuddy image and works with API keys. The older archive
+upload endpoint, `POST /api/v1/archives/upload`, can reject API keys on recent
+Bambuddy versions with `API keys cannot be used for administrative operations`,
+so it is no longer the default.
+
+If you want uploads to go directly into Archive instead of Library on latest
+stock Bambuddy, use `--forward-mode archive` with a real user bearer token
+instead of an API key. Latest Bambuddy treats archive upload as a user/admin
+operation and can reject `bb_...` API keys there.
 
 `buddy_recv.py` uses only the Python standard library.
 
 Use this when:
 
 - Bambuddy is already running and you do not want to rebuild its Docker image.
-- The ESP firmware is already working, but the main Bambuddy host does not have
-  the ESP ingest route.
+- The ESP firmware is already working, but you want a stable sidecar port in
+  front of Bambuddy.
+- The main Bambuddy host may be older and may not have the ESP ingest route.
 - You want to keep the ESP target URL stable on another local port, usually
   `http://<host-ip>:8001`.
 
@@ -190,7 +235,8 @@ Start Bambuddy normally on port 8000, then run:
 python3 esp-vp/buddy_recv.py \
   --host 0.0.0.0 \
   --port 8001 \
-  --bambuddy-url http://127.0.0.1:8000
+  --bambuddy-url http://127.0.0.1:8000 \
+  --forward-mode library
 ```
 
 If Bambuddy auth is enabled:
@@ -202,6 +248,34 @@ python3 esp-vp/buddy_recv.py \
   --bambuddy-url http://127.0.0.1:8000 \
   --api-key bb_xxx
 ```
+
+Archive mode with a user JWT:
+
+```bash
+python3 esp-vp/buddy_recv.py \
+  --host 0.0.0.0 \
+  --port 8001 \
+  --bambuddy-url http://127.0.0.1:8000 \
+  --forward-mode archive \
+  --bearer-token "eyJ..."
+```
+
+Archive mode with automatic login:
+
+```bash
+python3 esp-vp/buddy_recv.py \
+  --host 0.0.0.0 \
+  --port 8001 \
+  --bambuddy-url http://127.0.0.1:8000 \
+  --forward-mode archive \
+  --username admin \
+  --password "your-password"
+```
+
+The receiver logs in through `POST /api/v1/auth/login`, caches the returned
+JWT, and retries once with a fresh login if Bambuddy returns `401`. If the user
+has 2FA enabled, Bambuddy does not return an access token from `/auth/login`;
+use `--bearer-token` or a dedicated non-2FA service user.
 
 Build the ESP firmware with the receiver URL, not the Bambuddy URL:
 
@@ -223,7 +297,7 @@ Docker option:
 
 ```bash
 cd esp-vp
-docker compose -f docker-compose.buddy-recv.yml up -d --build
+docker compose up -d --build
 ```
 
 The compose file uses host networking. By default the container listens on host
@@ -232,14 +306,31 @@ Bambuddy host API is elsewhere:
 
 ```bash
 BAMBUDDY_URL=http://192.168.1.127:8000 \
-docker compose -f docker-compose.buddy-recv.yml up -d --build
+docker compose up -d --build
 ```
 
 With auth:
 
 ```bash
 BAMBUDDY_API_KEY=bb_xxx \
-docker compose -f docker-compose.buddy-recv.yml up -d --build
+docker compose up -d --build
+```
+
+Archive mode with a user JWT:
+
+```bash
+BUDDY_RECV_FORWARD_MODE=archive \
+BAMBUDDY_BEARER_TOKEN="eyJ..." \
+docker compose up -d --build
+```
+
+Archive mode with automatic login:
+
+```bash
+BUDDY_RECV_FORWARD_MODE=archive \
+BAMBUDDY_USERNAME=admin \
+BAMBUDDY_PASSWORD="your-password" \
+docker compose up -d --build
 ```
 
 With host networking, the receiver binds directly on the host. On Linux this is
@@ -254,8 +345,25 @@ Useful receiver environment variables:
 BUDDY_RECV_PORT=8001
 BAMBUDDY_URL=http://127.0.0.1:8000
 BAMBUDDY_API_KEY=
+BAMBUDDY_BEARER_TOKEN=
+BAMBUDDY_USERNAME=
+BAMBUDDY_PASSWORD=
 BUDDY_RECV_MAX_UPLOAD_BYTES=0
 BUDDY_RECV_PRINTER_ID=
+BUDDY_RECV_LIBRARY_FOLDER_ID=
+BUDDY_RECV_FORWARD_MODE=library
+```
+
+Forward modes:
+
+```text
+library  Upload to stock latest /api/v1/library/files. This is the default.
+auto     Try /api/v1/library/files, then fall back to /api/v1/archives/upload
+         only when no API key is configured.
+archive  Force the older /api/v1/archives/upload multipart API.
+         On latest stock Bambuddy with auth enabled, use BAMBUDDY_BEARER_TOKEN
+         instead of BAMBUDDY_API_KEY.
+esp-vp   Require the custom /api/v1/esp-vp/upload route.
 ```
 
 ## Protocol Surface

@@ -11,3 +11,5 @@ include/app_config.generated.h
 __pycache__/
 *.pyc
 vp_cert
+ui/node_modules/
+ui/dist/
