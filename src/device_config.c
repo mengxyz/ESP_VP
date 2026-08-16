@@ -20,6 +20,7 @@ typedef struct {
     char access_code[16];
     char mode[24];
     int paired_printer_id;
+    uint8_t led_brightness;
     char upload_base_url[128];
     char api_key[96];
     char receiver_token[96];
@@ -31,6 +32,7 @@ static runtime_config_t s_config;
 static char s_device_id[32] = ESP_VP_SERIAL;
 
 static bool json_get_string(const char *json, const char *key, char *out, size_t out_len);
+static bool json_get_int(const char *json, const char *key, int *out);
 
 static void init_device_id(void)
 {
@@ -63,6 +65,7 @@ static void set_default_config(void)
     strlcpy(s_config.access_code, APP_VP_ACCESS_CODE, sizeof(s_config.access_code));
     strlcpy(s_config.mode, "archive", sizeof(s_config.mode));
     s_config.paired_printer_id = 0;
+    s_config.led_brightness = 100;
     strlcpy(s_config.upload_base_url, APP_BAMBUDDY_BASE_URL, sizeof(s_config.upload_base_url));
     strlcpy(s_config.api_key, APP_BAMBUDDY_API_KEY, sizeof(s_config.api_key));
     strlcpy(s_config.receiver_token, "", sizeof(s_config.receiver_token));
@@ -121,6 +124,13 @@ esp_err_t esp_vp_config_init(void)
     } else if (err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW(TAG, "failed to load paired_pid err=%s", esp_err_to_name(err));
     }
+    uint8_t led_brightness = s_config.led_brightness;
+    err = nvs_get_u8(nvs, "led_brightness", &led_brightness);
+    if (err == ESP_OK) {
+        s_config.led_brightness = led_brightness > 100 ? 100 : led_brightness;
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "failed to load led_brightness err=%s", esp_err_to_name(err));
+    }
     nvs_close(nvs);
     return ESP_OK;
 }
@@ -137,6 +147,7 @@ const char *esp_vp_serial(void) { return s_config.serial; }
 const char *esp_vp_access_code(void) { return s_config.access_code; }
 const char *esp_vp_mode(void) { return s_config.mode; }
 int esp_vp_paired_printer_id(void) { return s_config.paired_printer_id; }
+uint8_t esp_vp_led_brightness(void) { return s_config.led_brightness; }
 const char *esp_vp_api_key(void) { return s_config.api_key; }
 const char *esp_vp_receiver_token(void) { return s_config.receiver_token; }
 const char *esp_vp_tls_cert_pem(void) { return s_config.tls_cert_pem; }
@@ -240,6 +251,26 @@ static bool json_get_string(const char *json, const char *key, char *out, size_t
     return idx > 0;
 }
 
+static bool json_get_int(const char *json, const char *key, int *out)
+{
+    char pattern[40];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (p == NULL) {
+        return false;
+    }
+    p = strchr(p + strlen(pattern), ':');
+    if (p == NULL) {
+        return false;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    *out = atoi(p);
+    return true;
+}
+
 esp_err_t esp_vp_apply_config_json(const char *json)
 {
     char name[sizeof(s_config.name)];
@@ -253,6 +284,7 @@ esp_err_t esp_vp_apply_config_json(const char *json)
     char token[sizeof(s_config.receiver_token)];
     char tls_cert[sizeof(s_config.tls_cert_pem)];
     char tls_key[sizeof(s_config.tls_key_pem)];
+    int led_brightness = s_config.led_brightness;
 
     strlcpy(name, s_config.name, sizeof(name));
     strlcpy(model, s_config.model_code, sizeof(model));
@@ -285,6 +317,13 @@ esp_err_t esp_vp_apply_config_json(const char *json)
     json_get_string(json, "receiver_token", token, sizeof(token));
     json_get_string(json, "tls_cert_pem", tls_cert, sizeof(tls_cert));
     json_get_string(json, "tls_key_pem", tls_key, sizeof(tls_key));
+    if (json_get_int(json, "led_brightness", &led_brightness)) {
+        if (led_brightness < 0) {
+            led_brightness = 0;
+        } else if (led_brightness > 100) {
+            led_brightness = 100;
+        }
+    }
 
     if (strncmp(upload_url, "http://", 7) != 0) {
         return ESP_ERR_INVALID_ARG;
@@ -301,6 +340,7 @@ esp_err_t esp_vp_apply_config_json(const char *json)
     strlcpy(s_config.receiver_token, token, sizeof(s_config.receiver_token));
     strlcpy(s_config.tls_cert_pem, tls_cert, sizeof(s_config.tls_cert_pem));
     strlcpy(s_config.tls_key_pem, tls_key, sizeof(s_config.tls_key_pem));
+    s_config.led_brightness = (uint8_t)led_brightness;
     s_config.configured = true;
     const char *paired_key = strstr(json, "\"paired_printer_id\"");
     if (paired_key == NULL) {
@@ -332,7 +372,11 @@ esp_err_t esp_vp_apply_config_json(const char *json)
     save_str(nvs, "token", s_config.receiver_token);
     save_str(nvs, "tls_cert", s_config.tls_cert_pem);
     save_str(nvs, "tls_key", s_config.tls_key_pem);
-    esp_err_t save_err = nvs_set_u8(nvs, "configured", s_config.configured ? 1 : 0);
+    esp_err_t save_err = nvs_set_u8(nvs, "led_brightness", s_config.led_brightness);
+    if (save_err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to save led_brightness err=%s", esp_err_to_name(save_err));
+    }
+    save_err = nvs_set_u8(nvs, "configured", s_config.configured ? 1 : 0);
     if (save_err != ESP_OK) {
         ESP_LOGW(TAG, "failed to save configured err=%s", esp_err_to_name(save_err));
     }
@@ -342,9 +386,9 @@ esp_err_t esp_vp_apply_config_json(const char *json)
     }
     err = nvs_commit(nvs);
     nvs_close(nvs);
-    ESP_LOGI(TAG, "applied config name=\"%s\" model=%s product=\"%s\" serial=%s mode=%s paired_printer_id=%d upload_base_url=%s",
+    ESP_LOGI(TAG, "applied config name=\"%s\" model=%s product=\"%s\" serial=%s mode=%s paired_printer_id=%d led_brightness=%u upload_base_url=%s",
              s_config.name, s_config.model_code, s_config.product_name, s_config.serial,
-             s_config.mode, s_config.paired_printer_id, s_config.upload_base_url);
+             s_config.mode, s_config.paired_printer_id, (unsigned)s_config.led_brightness, s_config.upload_base_url);
     if (err == ESP_OK) {
         esp_vp_start_printer_services_once();
     }

@@ -178,11 +178,15 @@ static void ssdp_task(void *arg)
         int len = recvfrom(sock, rx, sizeof(rx) - 1, 0, (struct sockaddr *)&source, &slen);
         if (len >= 0) {
             rx[len] = '\0';
+            if (strstr(rx, "M-SEARCH")) {
+                esp_vp_diag_record_ssdp_search();
+            }
             if (strstr(rx, "M-SEARCH") &&
                 (strstr(rx, "urn:bambulab-com:device:3dprinter:1") || strstr(rx, "ssdp:all"))) {
                 maybe_update_manager_url(rx);
                 int n = build_ssdp_response(tx, sizeof(tx), "HTTP/1.1 200 OK");
                 sendto(sock, tx, n, 0, (struct sockaddr *)&source, slen);
+                esp_vp_diag_record_ssdp_response();
                 status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 700);
                 ESP_LOGI(TAG, "discovery response sent to %s:%d location=%s",
                     inet_ntoa(source.sin_addr),

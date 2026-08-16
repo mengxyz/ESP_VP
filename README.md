@@ -183,8 +183,13 @@ python3 -m esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX --baud 460800 \
   write_flash -z \
   0x0 esp-vp/out/p1s/bootloader.bin \
   0x8000 esp-vp/out/p1s/partitions.bin \
-  0x10000 esp-vp/out/p1s/firmware.bin
+  0xf000 esp-vp/out/p1s/ota_data_initial.bin \
+  0x20000 esp-vp/out/p1s/firmware.bin
 ```
+
+Use the exact flash command printed by `build.py` when in doubt. Current
+manager-mode builds use an OTA partition table, so the app image belongs at
+`0x20000`, not `0x10000`.
 
 After boot, check whether the ESP VP is reachable:
 
@@ -277,10 +282,13 @@ JWT, and retries once with a fresh login if Bambuddy returns `401`. If the user
 has 2FA enabled, Bambuddy does not return an access token from `/auth/login`;
 use `--bearer-token` or a dedicated non-2FA service user.
 
-Build the ESP firmware with the receiver URL, not the Bambuddy URL:
+Build manager-mode ESP firmware with the receiver URL, not the Bambuddy URL:
 
 ```bash
-python3 esp-vp/build.py --model X2D --bambuddy-url http://192.168.1.127:8001
+python3 esp-vp/build.py \
+  --model X2D \
+  --manager-mode \
+  --receiver-url http://192.168.1.127:8001
 ```
 
 Then flash the generated `out/<model>/firmware.bin`. When a slicer sends a file,
@@ -292,6 +300,151 @@ Health check:
 ```bash
 curl http://127.0.0.1:8001/health
 ```
+
+## VP Manager Pairing Guide
+
+Use this flow for normal devices. The ESP should be a network bootstrap device
+first; printer name, model, serial, access code, upload URL, certificate/key,
+mode, paired printer, and LED brightness are configured later from VP Manager.
+You should not need to rebuild firmware just to change the virtual printer.
+
+The topology is:
+
+```text
+Bambuddy <-> VP Manager / buddy_recv <-> ESP VP <-> Bambu Studio / OrcaSlicer
+```
+
+Important URLs:
+
+- `Bambuddy URL`: where VP Manager forwards uploads, for example
+  `http://192.168.1.140:8000`.
+- `Receiver URL for ESP uploads`: where the ESP sends uploads and receives
+  config, for example `http://192.168.1.127:18081`.
+- The ESP does not need to call Bambuddy directly in normal manager mode.
+
+Start VP Manager:
+
+```bash
+python3 esp-vp/buddy_recv.py \
+  --host 0.0.0.0 \
+  --port 18081 \
+  --bambuddy-url http://192.168.1.140:8000 \
+  --receiver-url http://192.168.1.127:18081
+```
+
+Open the UI:
+
+```text
+http://127.0.0.1:18081
+```
+
+In `Settings`:
+
+1. Set `Receiver URL for ESP uploads` to the LAN URL reachable from the ESP,
+   usually `http://<manager-lan-ip>:18081`.
+2. Set `Bambuddy URL` to the Bambuddy server URL.
+3. Choose forwarding mode:
+   - `library`: recommended default; API key is usually enough.
+   - `archive`: uploads directly to Archives; requires Bambuddy username/password
+     or a user/admin bearer token. API keys can be rejected by Bambuddy archive
+     routes.
+   - `proxy_status`: pair this ESP with a Bambuddy printer and let the ESP cache
+     printer status for slicer report calls.
+4. Click `Test Host`. The result shows both Bambuddy host reachability and
+   archive-capable user auth.
+
+Build a blank manager-mode firmware. Use the receiver URL, not the Bambuddy URL:
+
+```bash
+python3 esp-vp/build.py \
+  --model P1S \
+  --manager-mode \
+  --status-led-pin 1 \
+  --receiver-url http://192.168.1.127:18081 \
+  --firmware-version 0005 \
+  --wifi-ssid "Your WiFi" \
+  --wifi-password "YourPassword"
+```
+
+Flash the full generated image set:
+
+```bash
+python3 -m esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX --baud 460800 \
+  write_flash -z \
+  0x0 esp-vp/out/p1s/bootloader.bin \
+  0x8000 esp-vp/out/p1s/partitions.bin \
+  0xf000 esp-vp/out/p1s/ota_data_initial.bin \
+  0x20000 esp-vp/out/p1s/firmware.bin
+```
+
+First boot should show logs like:
+
+```text
+management: listening TCP/8080
+esp_vp: device_info firmware=0005 manager_mode=1 configured=0 paired=0 ...
+```
+
+Pair the ESP:
+
+1. Hold the ESP BOOT button for about 5 seconds.
+2. The status LED enters pair mode for 120 seconds.
+3. In VP Manager, open `Devices`, then `Add device`.
+4. Scan/discover devices.
+5. Select the discovered ESP and click `Pair`.
+
+Pairing exchanges a receiver token. After pairing, VP Manager can authenticate
+to the ESP management API on port `8080`. If the UI says `Pair the device before
+pushing config`, hold BOOT again and pair the ESP; deleting a stale paired
+device in the UI is safe and lets you pair it again.
+
+Configure the virtual printer:
+
+1. Open the paired device card.
+2. Set name, model, serial, access code, mode, paired printer, and LED
+   brightness.
+3. Check `Generate and include printer cert/key` when you want VP Manager to
+   generate and push the printer TLS identity.
+4. Click `Save + Push`.
+
+Successful push should show ESP logs like:
+
+```text
+device_config: applied config name="ESP VP X2D" model=N6 product="X2D" ...
+esp_vp: printer services started
+```
+
+After config is pushed, the slicer should discover the configured name/model and
+connect to the ESP on the normal printer ports:
+
+```text
+TCP/3000  bind
+TCP/3002  bind TLS
+TCP/8883  MQTT TLS
+TCP/990   FTPS
+TCP/8080  ESP management API for VP Manager only
+```
+
+Use OTA after the first full flash:
+
+1. Build new firmware with a higher `--firmware-version`.
+2. In the device card, click `Update firmware`.
+3. Upload `esp-vp/out/<model>/firmware.bin` only.
+
+Do not upload `bootloader.bin`, `partitions.bin`, or `ota_data_initial.bin` to
+the OTA dialog. Those are only for USB flashing.
+
+Troubleshooting:
+
+- `ESP management API unavailable`: firmware is not listening on TCP/8080, the
+  ESP IP changed, or the device is on another network.
+- `HTTP 401` when pushing config or OTA: the ESP was reflashed or unpaired; pair
+  it again with BOOT hold.
+- `configured=0 paired=0`: expected for blank firmware before pairing/config.
+- `configured=1 paired=1`: ESP has saved manager config and should survive
+  reboot.
+- Archive upload fails with Bambuddy login `401`: the Bambuddy username/password
+  in VP Manager is wrong, uses an unsupported auth flow, or needs 2FA. Use a
+  valid local service user or a current user/admin bearer token.
 
 Docker option:
 

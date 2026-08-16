@@ -252,6 +252,7 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     if (archive_upload) {
         status_led_set(ESP_VP_STATUS_READY);
         if (err == ESP_OK) {
+            esp_vp_diag_record_upload_success();
             status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 1200);
         } else {
             status_led_pulse(ESP_VP_STATUS_ERROR, 1800);
@@ -372,6 +373,7 @@ static void ftps_task(void *arg)
         socklen_t peer_len = sizeof(peer);
         int client = accept(listener, (struct sockaddr *)&peer, &peer_len);
         if (client >= 0) {
+            esp_vp_diag_record_ftps_accept();
             ESP_LOGI(TAG, "accepted TCP/%d from %s", ESP_VP_FTPS_PORT, inet_ntoa(peer.sin_addr));
             xTaskCreate(ftp_client_task, "ftp_client", 8192, (void *)(intptr_t)client, 5, NULL);
         }

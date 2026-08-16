@@ -76,6 +76,7 @@
     access_code: "12345678",
     mode: "library",
     paired_printer_id: "",
+    led_brightness: 100,
     generate_cert: false,
   };
 
@@ -84,6 +85,14 @@
 
   function bool(value: unknown): boolean {
     return value === true || value === 1 || value === "1";
+  }
+
+  function isPaired(device: Device): boolean {
+    return bool(device.paired ?? device.claimed) && Boolean(device.device_token);
+  }
+
+  function needsRepair(device: Device): boolean {
+    return bool(device.paired ?? device.claimed) && !device.device_token;
   }
 
   function parseRoute() {
@@ -132,6 +141,7 @@
       access_code: String(config.access_code ?? "12345678"),
       mode: String(config.mode ?? state.settings.forward_mode ?? "library"),
       paired_printer_id: String(config.paired_printer_id ?? config.target_printer_id ?? config.printer_id ?? ""),
+      led_brightness: Number(config.led_brightness ?? 100),
       generate_cert: state.ca_imported,
     };
     if (!deviceForm.serial) fillSerial(true);
@@ -202,11 +212,11 @@
   }
 
   function pairedDevices(): Device[] {
-    return state.devices.filter((device) => bool(device.paired ?? device.claimed));
+    return state.devices.filter(isPaired);
   }
 
   function addableDevices(): Device[] {
-    return state.devices.filter((device) => !bool(device.paired ?? device.claimed));
+    return state.devices.filter((device) => !isPaired(device) || bool(device.pair_ready));
   }
 
   function openAddDeviceDialog() {
@@ -235,14 +245,20 @@
 
   async function testBambuddyHost() {
     await runAction("bambuddy-test", async () => {
-      bambuddyTest = await api<Record<string, unknown>>("/api/settings/test-bambuddy", {
+      const host = await api<Record<string, unknown>>("/api/settings/test-bambuddy", {
         method: "POST",
         body: JSON.stringify({ bambuddy_url: settingsForm.bambuddy_url }),
       });
+      const auth = await api<Record<string, unknown>>("/api/settings/test-bambuddy-auth", {
+        method: "POST",
+        body: JSON.stringify(settingsForm),
+      });
+      bambuddyTest = { host, auth };
+      const authStatus = String(auth.status ?? "unknown");
       showToast(
-        bambuddyTest.status === "ok"
-          ? `Bambuddy host reachable: HTTP ${String(bambuddyTest.status_code ?? "")}`
-          : `Bambuddy host test: ${String(bambuddyTest.detail ?? bambuddyTest.status ?? "failed")}`);
+        host.status === "ok" && auth.status === "ok"
+          ? "Bambuddy host and archive auth ok"
+          : `Bambuddy test: host=${String(host.status ?? "unknown")} auth=${authStatus}`);
     });
   }
 
@@ -369,6 +385,7 @@
       access_code: deviceForm.access_code,
       mode: deviceForm.mode,
       paired_printer_id: deviceForm.mode === "proxy_status" && deviceForm.paired_printer_id ? Number(deviceForm.paired_printer_id) : undefined,
+      led_brightness: Math.max(0, Math.min(100, Number(deviceForm.led_brightness) || 0)),
       receiver_url: settingsForm.receiver_url || undefined,
       generate_cert: deviceForm.generate_cert,
     };
@@ -525,7 +542,9 @@
               <section class="device-layout">
                 <article class="panel">
                   <div class="badges">
-                    <span class="badge">{bool(detail.device.paired ?? detail.device.claimed) ? "Paired" : "Unpaired"}</span>
+                    <span class="badge" class:ok={isPaired(detail.device)} class:bad={needsRepair(detail.device)}>
+                      {isPaired(detail.device) ? "Paired" : needsRepair(detail.device) ? "Needs re-pair" : "Unpaired"}
+                    </span>
                     <span class="badge" class:ok={bool(detail.device.pair_ready)}>
                       {bool(detail.device.pair_ready) ? `Ready to pair ${detail.device.pair_remaining_seconds ?? ""}s` : "Not in pair mode"}
                     </span>
@@ -561,6 +580,10 @@
                         <option>immediate</option><option>print_queue</option><option>library</option><option>proxy_status</option>
                       </select>
                     </label>
+                    <label class="range-field">
+                      <span>ARGB brightness <b>{deviceForm.led_brightness}%</b></span>
+                      <input type="range" min="0" max="100" step="5" bind:value={deviceForm.led_brightness} />
+                    </label>
                   </div>
                   {#if deviceForm.mode === "proxy_status"}
                     <label class="wide-field">
@@ -590,8 +613,8 @@
                     <button class="button" disabled={!!busyAction} on:click={() => pairDevice(selectedDevice)}>Pair</button>
                     <button class="button" disabled={!!busyAction} on:click={probeDevice}><Wifi size={16} /> Probe</button>
                     <button class="button" disabled={!!busyAction} on:click={() => pushDevice(false)}>Push saved</button>
-                    <button class="button" disabled={!!busyAction || !bool(detail.device.paired ?? detail.device.claimed)} on:click={openFirmwareDialog}><UploadCloud size={16} /> Update FW</button>
-                    {#if bool(detail.device.paired ?? detail.device.claimed)}
+                    <button class="button" disabled={!!busyAction || !isPaired(detail.device)} on:click={openFirmwareDialog}><UploadCloud size={16} /> Update FW</button>
+                    {#if isPaired(detail.device)}
                       <button class="button danger" disabled={!!busyAction} on:click={() => deleteDevice(selectedDevice)}><Trash2 size={16} /> Delete</button>
                     {/if}
                   </div>
@@ -702,8 +725,12 @@
                 <p><code>{device.device_id}</code> · {device.ip ?? "unknown IP"} · FW {device.firmware_version ?? "unknown"}</p>
               </div>
               <div class="badges">
-                {#if bool(device.pair_ready)}
+                {#if isPaired(device)}
+                  <span class="badge ok">paired</span>
+                {:else if bool(device.pair_ready)}
                   <span class="badge ok">ready {device.pair_remaining_seconds ?? ""}s</span>
+                {:else if needsRepair(device)}
+                  <span class="badge bad">needs re-pair</span>
                 {:else}
                   <span class="badge">hold BOOT</span>
                 {/if}

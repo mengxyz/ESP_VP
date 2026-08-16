@@ -54,14 +54,17 @@ static void send_response(int client, int status, const char *reason, const char
 
 static void handle_info(int client)
 {
-    char body[800];
+    char body[1100];
     int len = snprintf(body, sizeof(body),
                        "{\"status\":\"ok\",\"firmware\":\"%s\",\"manager_mode\":%s,"
                        "\"configured\":%s,\"paired\":%s,\"pair_ready\":%s,\"pair_remaining_seconds\":%d,"
                        "\"device_id\":\"%s\","
                        "\"name\":\"%s\",\"model_code\":\"%s\",\"product_name\":\"%s\","
-                       "\"serial\":\"%s\",\"access_code\":\"%s\",\"upload_base_url\":\"%s\","
-                       "\"ip\":\"%s\"}",
+                       "\"serial\":\"%s\",\"access_code\":\"%s\",\"led_brightness\":%u,\"upload_base_url\":\"%s\","
+                       "\"ip\":\"%s\","
+                       "\"diag\":{\"ssdp_searches\":%lu,\"ssdp_responses\":%lu,"
+                       "\"bind_accepts\":%lu,\"mqtt_accepts\":%lu,\"ftps_accepts\":%lu,"
+                       "\"upload_successes\":%lu}}",
                        esp_vp_firmware_version(),
                        esp_vp_manager_mode() ? "true" : "false",
                        esp_vp_is_configured() ? "true" : "false",
@@ -74,8 +77,15 @@ static void handle_info(int client)
                        esp_vp_product_name(),
                        esp_vp_serial(),
                        esp_vp_access_code(),
+                       (unsigned)esp_vp_led_brightness(),
                        esp_vp_upload_base_url(),
-                       wifi_local_ip());
+                       wifi_local_ip(),
+                       (unsigned long)esp_vp_diag_ssdp_searches(),
+                       (unsigned long)esp_vp_diag_ssdp_responses(),
+                       (unsigned long)esp_vp_diag_bind_accepts(),
+                       (unsigned long)esp_vp_diag_mqtt_accepts(),
+                       (unsigned long)esp_vp_diag_ftps_accepts(),
+                       (unsigned long)esp_vp_diag_upload_successes());
     if (len < 0 || len >= (int)sizeof(body)) {
         send_response(client, 500, "Internal Server Error", "{\"detail\":\"info response too large\"}");
         return;

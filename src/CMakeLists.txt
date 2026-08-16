@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "diagnostics.c"
         "status_led.c"
         "pair_button.c"
         "wifi.c"

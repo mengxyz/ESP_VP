@@ -6,6 +6,7 @@ export type Device = {
   firmware_version?: string | null;
   configured: number | boolean;
   paired?: number | boolean;
+  device_token?: string | null;
   pair_ready?: number | boolean;
   pair_remaining_seconds?: number | null;
   claimed: number | boolean;

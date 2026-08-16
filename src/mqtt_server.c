@@ -425,6 +425,7 @@ static void mqtt_task(void *arg)
                 continue;
             }
             s_active_mqtt_clients++;
+            esp_vp_diag_record_mqtt_accept();
             ESP_LOGI(TAG, "accepted TCP/%d from %s", ESP_VP_MQTT_PORT, inet_ntoa(peer.sin_addr));
             status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 900);
             BaseType_t created = xTaskCreate(mqtt_client_task, "mqtt_client", 8192, (void *)(intptr_t)client, 5, NULL);

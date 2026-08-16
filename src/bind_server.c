@@ -77,6 +77,7 @@ static void bind_task(void *arg)
         if (client < 0) {
             continue;
         }
+        esp_vp_diag_record_bind_accept();
         ESP_LOGI(TAG, "accepted TCP/%d from %s", port, inet_ntoa(peer.sin_addr));
         status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 900);
         tls_socket_t *sock = calloc(1, sizeof(*sock));

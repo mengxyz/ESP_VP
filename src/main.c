@@ -25,10 +25,12 @@ static void device_info_log_task(void *arg)
     (void)arg;
     while (true) {
         ESP_LOGI(TAG,
-                 "device_info firmware=%s manager_mode=%d configured=%d ip=%s name=\"%s\" model=%s product=\"%s\" serial=%s access_code=%s mode=%s paired_printer_id=%d upload_base_url=%s",
+                 "device_info firmware=%s manager_mode=%d configured=%d paired=%d services=%d ip=%s name=\"%s\" model=%s product=\"%s\" serial=%s access_code=%s mode=%s paired_printer_id=%d led_brightness=%u upload_base_url=%s diag={ssdp_searches:%lu,ssdp_responses:%lu,bind:%lu,mqtt:%lu,ftps:%lu,uploads:%lu}",
                  esp_vp_firmware_version(),
                  esp_vp_manager_mode() ? 1 : 0,
                  esp_vp_is_configured() ? 1 : 0,
+                 esp_vp_is_paired() ? 1 : 0,
+                 s_printer_services_started ? 1 : 0,
                  wifi_local_ip(),
                  esp_vp_name(),
                  esp_vp_model_code(),
@@ -37,8 +39,15 @@ static void device_info_log_task(void *arg)
                  esp_vp_access_code(),
                  esp_vp_mode(),
                  esp_vp_paired_printer_id(),
-                 esp_vp_upload_base_url());
-        vTaskDelay(pdMS_TO_TICKS(2000));
+                 (unsigned)esp_vp_led_brightness(),
+                 esp_vp_upload_base_url(),
+                 (unsigned long)esp_vp_diag_ssdp_searches(),
+                 (unsigned long)esp_vp_diag_ssdp_responses(),
+                 (unsigned long)esp_vp_diag_bind_accepts(),
+                 (unsigned long)esp_vp_diag_mqtt_accepts(),
+                 (unsigned long)esp_vp_diag_ftps_accepts(),
+                 (unsigned long)esp_vp_diag_upload_successes());
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
@@ -57,7 +66,7 @@ void app_main(void)
     status_led_set(ESP_VP_STATUS_BOOT);
     ESP_LOGI(TAG, "firmware=%s manager_mode=%d configured=%d",
              esp_vp_firmware_version(), esp_vp_manager_mode() ? 1 : 0, esp_vp_is_configured() ? 1 : 0);
-    ESP_LOGI(TAG, "config name=\"%s\" model=%s product=\"%s\" serial=%s access_code=%s mode=%s paired_printer_id=%d upload_base_url=%s",
+    ESP_LOGI(TAG, "config name=\"%s\" model=%s product=\"%s\" serial=%s access_code=%s mode=%s paired_printer_id=%d led_brightness=%u upload_base_url=%s",
              esp_vp_name(),
              esp_vp_model_code(),
              esp_vp_product_name(),
@@ -65,6 +74,7 @@ void app_main(void)
              esp_vp_access_code(),
              esp_vp_mode(),
              esp_vp_paired_printer_id(),
+             (unsigned)esp_vp_led_brightness(),
              esp_vp_upload_base_url());
     ESP_ERROR_CHECK(wifi_start());
 

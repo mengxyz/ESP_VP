@@ -94,6 +94,13 @@ def safe_3mf_filename(filename: str | None) -> str:
     return safe
 
 
+def safe_upload_filename(filename: str | None, default: str = "upload.bin") -> str:
+    safe = Path((filename or default).replace("\\", "/")).name.strip()
+    if not safe or safe in {".", ".."}:
+        raise HTTPException(400, "Invalid filename")
+    return safe
+
+
 def generated_serial(model_code: str, device_id: str) -> str:
     model = MODELS.get(model_code) or MODELS["C12"]
     suffix_num = int(hashlib.sha1(device_id.encode()).hexdigest()[:12], 16) % 1_000_000_000
@@ -325,6 +332,11 @@ class Store:
             raise HTTPException(400, "device_id is required")
         existing = self.conn.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone()
         name = str(payload.get("name") or (existing["name"] if existing else f"vp_{device_id[-6:]}"))
+        payload_has_paired = "paired" in payload
+        paired_value = bool(payload.get("paired", existing["paired"] if existing and "paired" in existing.keys() else False))
+        claimed_value = bool(claimed if claimed is not None else (existing["claimed"] if existing else False))
+        if payload_has_paired and not paired_value:
+            claimed_value = False
         values = {
             "device_id": device_id,
             "name": name,
@@ -332,10 +344,10 @@ class Store:
             "management_url": payload.get("management_url") or (existing["management_url"] if existing else None),
             "firmware_version": payload.get("firmware_version") or (existing["firmware_version"] if existing else None),
             "configured": int(bool(payload.get("configured", existing["configured"] if existing else False))),
-            "paired": int(bool(payload.get("paired", existing["paired"] if existing and "paired" in existing.keys() else False))),
+            "paired": int(paired_value),
             "pair_ready": int(bool(payload.get("pair_ready", existing["pair_ready"] if existing and "pair_ready" in existing.keys() else False))),
             "pair_remaining_seconds": int(payload.get("pair_remaining_seconds", existing["pair_remaining_seconds"] if existing and "pair_remaining_seconds" in existing.keys() else 0) or 0),
-            "claimed": int(bool(claimed if claimed is not None else (existing["claimed"] if existing else False))),
+            "claimed": int(claimed_value),
             "receiver_managed": int(bool(payload.get("receiver_managed", True))),
             "last_seen": now_iso(),
             "created_at": existing["created_at"] if existing else now_iso(),
@@ -355,8 +367,15 @@ class Store:
             """,
             values,
         )
+        if payload_has_paired and not paired_value:
+            self.conn.execute(
+                "UPDATE devices SET token_hash = NULL, device_token = NULL, claimed = 0, paired = 0, updated_at = ? WHERE device_id = ?",
+                (now_iso(), device_id),
+            )
         self.conn.commit()
         self.add_device_event(device_id, "discovery", "success", "Device discovered or updated", {"ip": values["ip"], "management_url": values["management_url"]})
+        if existing and existing["device_token"] and payload_has_paired and not paired_value:
+            self.add_device_event(device_id, "pair", "failure", "ESP reported unpaired; local pairing cleared")
         return self.device(device_id)
 
     def delete_device(self, device_id: str) -> None:
@@ -539,10 +558,96 @@ class Manager:
             result["hint"] = "The host is reachable, but /health did not return a successful response."
         return result
 
+    async def test_bambuddy_user_auth(self, payload: dict[str, Any]) -> dict[str, Any]:
+        url = str(payload.get("bambuddy_url") or self.store.get_setting("bambuddy_url", "http://127.0.0.1:8000")).strip().rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(400, "Bambuddy URL must start with http:// or https://")
+
+        username = str(payload.get("username") or self.store.get_setting("username", "") or "")
+        password_value = payload.get("password")
+        password = self.store.get_setting("password", "") if password_value == "***" else str(password_value or "")
+        bearer_value = payload.get("bearer_token")
+        bearer = self.store.get_setting("bearer_token", "") if bearer_value == "***" else str(bearer_value or "")
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0), follow_redirects=False) as client:
+                if username and password:
+                    response = await client.post(f"{url}/api/v1/auth/login", json={"username": username, "password": password})
+                    if response.status_code >= 400:
+                        detail = response.text
+                        try:
+                            detail = str(response.json().get("detail", detail))
+                        except ValueError:
+                            pass
+                        return {
+                            "status": "failed",
+                            "bambuddy_url": url,
+                            "status_code": response.status_code,
+                            "detail": detail,
+                            "hint": "Archive mode requires a valid Bambuddy username/password for a user with archive permission.",
+                        }
+                    body = response.json() if response.content else {}
+                    if body.get("requires_2fa"):
+                        return {
+                            "status": "failed",
+                            "bambuddy_url": url,
+                            "status_code": response.status_code,
+                            "detail": "Bambuddy login requires 2FA",
+                            "hint": "Use a service user without 2FA or paste a current user bearer token.",
+                        }
+                    if not isinstance(body.get("access_token"), str) or not body.get("access_token"):
+                        return {
+                            "status": "failed",
+                            "bambuddy_url": url,
+                            "status_code": response.status_code,
+                            "detail": "Bambuddy login did not return an access token",
+                        }
+                    return {
+                        "status": "ok",
+                        "bambuddy_url": url,
+                        "status_code": response.status_code,
+                        "detail": "Bambuddy user login succeeded",
+                        "username": username,
+                    }
+
+                if bearer:
+                    response = await client.get(f"{url}/api/v1/auth/me", headers={"Authorization": f"Bearer {bearer}"})
+                    if response.status_code >= 400:
+                        return {
+                            "status": "failed",
+                            "bambuddy_url": url,
+                            "status_code": response.status_code,
+                            "detail": "Bambuddy bearer token was rejected",
+                            "hint": "Paste a current user/admin bearer token, not an API key.",
+                        }
+                    return {"status": "ok", "bambuddy_url": url, "status_code": response.status_code, "detail": "Bambuddy bearer token accepted"}
+        except httpx.ConnectError as exc:
+            return {"status": "unreachable", "bambuddy_url": url, "detail": "Bambuddy host is not accepting connections", "error_type": exc.__class__.__name__}
+        except httpx.TimeoutException as exc:
+            return {"status": "timeout", "bambuddy_url": url, "detail": "Bambuddy host timed out", "error_type": exc.__class__.__name__}
+        except httpx.RequestError as exc:
+            return {"status": "error", "bambuddy_url": url, "detail": "Bambuddy auth test failed", "error_type": exc.__class__.__name__}
+
+        return {
+            "status": "missing_credentials",
+            "bambuddy_url": url,
+            "detail": "Enter Bambuddy username/password or a user bearer token for archive mode.",
+        }
+
     async def list_bambuddy_printers(self) -> list[dict[str, Any]]:
-        headers = await self.auth_headers()
+        response: httpx.Response | None = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0)) as client:
-            response = await client.get(self.bambuddy_url("/api/v1/printers/"), headers=headers)
+            for headers in await self.auth_header_candidates():
+                response = await client.get(self.bambuddy_url("/api/v1/printers/"), headers=headers)
+                if response.status_code != 401:
+                    break
+            if response is not None and response.status_code == 401:
+                for headers in await self.auth_header_candidates(force_login=True):
+                    response = await client.get(self.bambuddy_url("/api/v1/printers/"), headers=headers)
+                    if response.status_code != 401:
+                        break
+        if response is None:
+            raise HTTPException(502, "Bambuddy printer list failed: no request was sent")
         if response.status_code >= 400:
             raise HTTPException(502, f"Bambuddy printer list failed: HTTP {response.status_code}")
         body = response.json() if response.content else []
@@ -615,16 +720,59 @@ class Manager:
         }
 
     async def auth_headers(self, force_login: bool = False) -> dict[str, str]:
+        candidates = await self.auth_header_candidates(force_login=force_login)
+        return candidates[0] if candidates else {}
+
+    async def user_auth_headers(self, force_login: bool = False) -> dict[str, str]:
+        candidates = await self.user_auth_header_candidates(force_login=force_login)
+        return candidates[0] if candidates else {}
+
+    async def auth_header_candidates(self, force_login: bool = False) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
         bearer = self.store.get_setting("bearer_token", "")
         if bearer:
-            return {"Authorization": f"Bearer {bearer}"}
-        token = await self.login_to_bambuddy(force=force_login)
-        if token:
-            return {"Authorization": f"Bearer {token}"}
+            candidates.append({"Authorization": f"Bearer {bearer}"})
+        try:
+            token = await self.login_to_bambuddy(force=force_login)
+            if token:
+                candidate = {"Authorization": f"Bearer {token}"}
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        except UploadError as exc:
+            LOG.warning("Bambuddy login credential candidate skipped: %s", exc.detail)
         api_key = self.store.get_setting("api_key", "")
-        if not api_key:
-            return {}
-        return {"X-API-Key": api_key, "Authorization": f"Bearer {api_key}"}
+        if api_key:
+            candidate = {"X-API-Key": api_key, "Authorization": f"Bearer {api_key}"}
+            if candidate not in candidates:
+                candidates.append(candidate)
+        if not candidates:
+            candidates.append({})
+        return candidates
+
+    async def user_auth_header_candidates(self, force_login: bool = False) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
+        login_error: UploadError | None = None
+        try:
+            token = await self.login_to_bambuddy(force=force_login)
+            if token:
+                candidates.append({"Authorization": f"Bearer {token}"})
+        except UploadError as exc:
+            login_error = exc
+
+        bearer = self.store.get_setting("bearer_token", "")
+        if bearer:
+            candidate = {"Authorization": f"Bearer {bearer}"}
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        if candidates:
+            return candidates
+        if login_error:
+            raise UploadError(
+                502,
+                f"{login_error.detail}; archive mode requires a Bambuddy user/admin login or user bearer token",
+            )
+        raise UploadError(502, "Archive mode requires Bambuddy username/password or a user bearer token")
 
     async def login_to_bambuddy(self, force: bool = False) -> str:
         username = self.store.get_setting("username", "")
@@ -647,26 +795,49 @@ class Manager:
         self.login_time = time.time()
         return token
 
-    async def forward_multipart(self, path: Path, filename: str, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        headers = await self.auth_headers()
+    async def forward_multipart(
+        self,
+        path: Path,
+        filename: str,
+        url: str,
+        params: dict[str, Any] | None = None,
+        *,
+        require_user_auth: bool = False,
+    ) -> dict[str, Any]:
+        response: httpx.Response | None = None
+        auth_candidates = self.user_auth_header_candidates if require_user_auth else self.auth_header_candidates
         async with httpx.AsyncClient(timeout=300) as client:
-            with path.open("rb") as fh:
-                response = await client.post(
-                    url,
-                    params={k: v for k, v in (params or {}).items() if v is not None},
-                    headers=headers,
-                    files={"file": (filename, fh, "application/vnd.ms-package.3dmanufacturing-3dmodel+xml")},
-                )
-            if response.status_code == 401 and self.store.get_setting("username", "") and not self.store.get_setting("bearer_token", ""):
-                headers = await self.auth_headers(force_login=True)
+            request_params = {k: v for k, v in (params or {}).items() if v is not None}
+            for headers in await auth_candidates():
                 with path.open("rb") as retry_fh:
                     response = await client.post(
                         url,
-                        params={k: v for k, v in (params or {}).items() if v is not None},
+                        params=request_params,
                         headers=headers,
                         files={"file": (filename, retry_fh, "application/vnd.ms-package.3dmanufacturing-3dmodel+xml")},
                     )
+                if response.status_code != 401:
+                    break
+            if response is not None and response.status_code == 401:
+                for headers in await auth_candidates(force_login=True):
+                    with path.open("rb") as retry_fh:
+                        response = await client.post(
+                            url,
+                            params=request_params,
+                            headers=headers,
+                            files={"file": (filename, retry_fh, "application/vnd.ms-package.3dmanufacturing-3dmodel+xml")},
+                        )
+                    if response.status_code != 401:
+                        break
+        if response is None:
+            raise UploadError(502, "Bambuddy upload failed: no request was sent")
         if response.status_code >= 400:
+            if require_user_auth and response.status_code in {401, 403}:
+                raise UploadError(
+                    502,
+                    f"Bambuddy archive upload failed: HTTP {response.status_code}; "
+                    "archive mode requires a valid Bambuddy user/admin bearer token",
+                )
             raise UploadError(502, f"Bambuddy upload failed: HTTP {response.status_code}")
         try:
             payload = response.json()
@@ -682,12 +853,18 @@ class Manager:
                 filename,
                 self.bambuddy_url("/api/v1/archives/upload"),
                 {"printer_id": self.store.get_setting("printer_id")},
+                require_user_auth=True,
             )
         if mode == "print_queue":
-            archive = await self.forward_multipart(path, filename, self.bambuddy_url("/api/v1/archives/upload"))
+            archive = await self.forward_multipart(
+                path,
+                filename,
+                self.bambuddy_url("/api/v1/archives/upload"),
+                require_user_auth=True,
+            )
             archive_id = archive.get("id") or archive.get("archive_id")
             if archive_id:
-                headers = await self.auth_headers()
+                headers = await self.user_auth_headers()
                 body = {"archive_id": archive_id, **self.store.get_setting("queue_options", {})}
                 async with httpx.AsyncClient(timeout=60) as client:
                     queue_response = await client.post(self.bambuddy_url("/api/v1/queue"), headers=headers, json=body)
@@ -846,11 +1023,12 @@ class Manager:
             "management_url": management_url,
             "firmware_version": result.get("firmware"),
             "configured": bool(result.get("configured", device.get("configured"))),
-            "paired": bool(result.get("paired", device.get("paired", False))),
             "pair_ready": bool(result.get("pair_ready", False)),
             "pair_remaining_seconds": int(result.get("pair_remaining_seconds") or 0),
             "receiver_managed": True,
         }
+        if "paired" in result:
+            update["paired"] = bool(result.get("paired"))
         if update["device_id"] == device_id:
             self.store.upsert_device(update)
         self.store.add_device_event(device_id, "probe", "success", "ESP management API reachable", {"status_code": response.status_code})
@@ -1105,6 +1283,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     async def test_bambuddy_settings(payload: dict[str, Any], manager: Manager = Depends(get_manager)) -> dict[str, Any]:
         return await manager.test_bambuddy_host(str(payload.get("bambuddy_url") or ""))
 
+    @app.post("/api/settings/test-bambuddy-auth", dependencies=[Depends(require_admin)])
+    async def test_bambuddy_auth_settings(payload: dict[str, Any], manager: Manager = Depends(get_manager)) -> dict[str, Any]:
+        return await manager.test_bambuddy_user_auth(payload)
+
     @app.get("/api/bambuddy/printers", dependencies=[Depends(require_admin)])
     async def bambuddy_printers(manager: Manager = Depends(get_manager)) -> list[dict[str, Any]]:
         return await manager.list_bambuddy_printers()
@@ -1226,6 +1408,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         payload["product_name"] = payload.get("product_name") or MODELS[model_code]["product_name"]
         if not str(payload.get("serial") or "").strip():
             payload["serial"] = generated_serial(model_code, device_id)
+        try:
+            led_brightness = int(payload.get("led_brightness", 100))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Invalid LED brightness") from None
+        payload["led_brightness"] = max(0, min(100, led_brightness))
         configured_receiver_url = str(manager.store.get_setting("receiver_url", "") or "").strip()
         base_url = str(payload.get("receiver_url") or configured_receiver_url or request_base_url(request)).rstrip("/")
         payload["receiver_url"] = base_url
@@ -1257,6 +1444,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             raise HTTPException(400, "Pair the device before pushing config")
         management_url = str(device["management_url"]).rstrip("/")
         await manager.probe_device(device_id)
+        device = dict(manager.store.device(device_id))
+        device_token = device.get("device_token")
+        if not device_token:
+            raise HTTPException(400, "Pair the device before pushing config")
         manager.store.add_device_event(device_id, "push_start", "running", "Pushing configuration to ESP", {"management_url": management_url})
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
@@ -1298,7 +1489,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         device_token = device.get("device_token")
         if not device_token:
             raise HTTPException(400, "Pair the device before updating firmware")
-        filename = safe_filename(firmware.filename or "firmware.bin")
+        filename = safe_upload_filename(firmware.filename, "firmware.bin")
         if not filename.endswith(".bin"):
             raise HTTPException(400, "Firmware must be a .bin file")
         data = await firmware.read()

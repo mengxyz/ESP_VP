@@ -22,7 +22,7 @@ static uint8_t scale(uint8_t value, uint8_t brightness)
     if (brightness > 48) {
         brightness = 48;
     }
-    return (uint8_t)(((uint16_t)value * brightness) / 255);
+    return (uint8_t)(((uint32_t)value * brightness * esp_vp_led_brightness()) / (255 * 100));
 }
 
 static void set_rgb(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
@@ -49,33 +49,33 @@ static void show_pattern(esp_vp_status_t status, uint32_t tick)
     switch (status) {
     case ESP_VP_STATUS_BOOT: {
         uint8_t pulse[] = {12, 24, 42, 70, 42, 24};
-        set_rgb(40, 90, 255, pulse[tick % 6]);
+        set_rgb(180, 255, 0, pulse[tick % 6]);
         break;
     }
     case ESP_VP_STATUS_WIFI_CONNECTING: {
         uint8_t pulse[] = {10, 35, 90, 35};
-        set_rgb(255, 120, 0, pulse[tick % 4]);
+        set_rgb(255, 190, 0, pulse[tick % 4]);
         break;
     }
     case ESP_VP_STATUS_READY:
         if ((tick % 50) == 0 || (tick % 50) == 3) {
-            set_rgb(0, 255, 90, 100);
+            set_rgb(0, 255, 0, 95);
         } else {
-            set_rgb(0, 255, 60, 10);
+            set_rgb(0, 180, 0, 10);
         }
         break;
     case ESP_VP_STATUS_CLIENT_ACTIVE:
-        set_rgb(0, 210, 255, (tick % 2) ? 160 : 35);
+        set_rgb(255, 200, 0, (tick % 2) ? 155 : 25);
         break;
     case ESP_VP_STATUS_UPLOADING:
         if ((tick % 6) < 3) {
-            set_rgb(180, 40, 255, 150);
+            set_rgb(255, 200, 0, 150);
         } else {
-            set_rgb(0, 180, 255, 90);
+            set_rgb(0, 255, 0, 90);
         }
         break;
     case ESP_VP_STATUS_PAIRING:
-        set_rgb(0, 220, 255, (tick % 4) < 2 ? 140 : 12);
+        set_rgb(255, 255, 255, (tick % 4) < 2 ? 140 : 12);
         break;
     case ESP_VP_STATUS_ERROR:
     default:
