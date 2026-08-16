@@ -1,0 +1,73 @@
+name: ESP VP Firmware Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Comma-separated model codes/names, for example P1S,X2D,A1 or all"
+        required: true
+        default: "P1S"
+      receiver_url:
+        description: "Default VP Manager receiver URL embedded in manager-mode firmware"
+        required: true
+        default: "http://192.168.1.127:18081"
+      firmware_version:
+        description: "Firmware version string advertised by ESP VP"
+        required: true
+        default: "esp-vp-release"
+      status_led_pin:
+        description: "ARGB/WS2812 status LED GPIO; -1 disables LED"
+        required: true
+        default: "1"
+  push:
+    tags:
+      - "esp-vp-fw-*"
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v6.0
+
+    env:
+      MODELS: ${{ github.event.inputs.models || 'P1S' }}
+      RECEIVER_URL: ${{ github.event.inputs.receiver_url || 'http://192.168.1.127:18081' }}
+      FIRMWARE_VERSION: ${{ github.event.inputs.firmware_version || github.ref_name }}
+      STATUS_LED_PIN: ${{ github.event.inputs.status_led_pin || '1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build manager-mode firmware
+        shell: bash
+        run: |
+          python3 build.py \
+            --model "${MODELS}" \
+            --manager-mode \
+            --status-led-pin "${STATUS_LED_PIN}" \
+            --receiver-url "${RECEIVER_URL}" \
+            --firmware-version "${FIRMWARE_VERSION}" \
+            --wifi-ssid "" \
+            --wifi-password "" \
+            --idf-path "${IDF_PATH}" \
+            --no-idf-bootstrap
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          find out -maxdepth 3 -type f -print0 | sort -z | xargs -0 sha256sum > out/SHA256SUMS
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp-vp-firmware-${{ env.FIRMWARE_VERSION }}
+          path: |
+            out/**
+          if-no-files-found: error
+          retention-days: 30
