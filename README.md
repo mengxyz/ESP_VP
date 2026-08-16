@@ -113,6 +113,14 @@ esp-vp/out/<model>/bbl_ca.crt
 esp-vp/out/<model>/virtual_printer_ca.crt
 ```
 
+GitHub Actions can also build firmware artifacts. Run `ESP VP Firmware
+Artifacts` from the Actions tab, choose the model list, receiver URL, firmware
+version, and LED pin, then download the artifact. Release/tag builds for
+`esp-vp-fw-*` also publish the same artifact. The artifact firmware is built
+with blank Wi-Fi credentials so first boot uses SoftAP provisioning. For OTA,
+upload only `out/<model>/firmware.bin`; use the other `.bin` files only for USB
+flashing.
+
 `printer.crt` and `printer.key` are the same TLS identity embedded into the
 firmware. Import/copy `bbl_ca.crt` to Bambu Studio / OrcaSlicer when a trusted
 printer certificate is needed; `virtual_printer_ca.crt` is the same CA with a
@@ -366,6 +374,20 @@ python3 esp-vp/build.py \
   --wifi-password "YourPassword"
 ```
 
+You can also build without Wi-Fi credentials and configure Wi-Fi from the ESP
+SoftAP after first boot:
+
+```bash
+python3 esp-vp/build.py \
+  --model P1S \
+  --manager-mode \
+  --status-led-pin 1 \
+  --receiver-url http://192.168.1.127:18081 \
+  --firmware-version 0005 \
+  --wifi-ssid "" \
+  --wifi-password ""
+```
+
 Flash the full generated image set:
 
 ```bash
@@ -383,6 +405,29 @@ First boot should show logs like:
 management: listening TCP/8080
 esp_vp: device_info firmware=0005 manager_mode=1 configured=0 paired=0 ...
 ```
+
+If Wi-Fi is blank or cannot connect after retrying, the ESP starts a fallback
+SoftAP:
+
+```text
+wifi: STA not connected; open SoftAP provisioning active ssid="ESP-VP-AE80" url=http://192.168.4.1:8080
+```
+
+Provision Wi-Fi through SoftAP:
+
+1. Connect your phone or laptop to the ESP AP shown in the serial log.
+2. The AP is open and has no password.
+3. Open or POST to the management API at `http://192.168.4.1:8080`.
+4. Save Wi-Fi credentials:
+
+```bash
+curl -X POST http://192.168.4.1:8080/api/v1/wifi/config \
+  -H 'Content-Type: application/json' \
+  -d '{"ssid":"Your WiFi","password":"YourPassword"}'
+```
+
+The ESP saves the credentials in NVS and reboots. On the next boot it should
+join your LAN and appear in VP Manager discovery.
 
 Pair the ESP:
 

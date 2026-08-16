@@ -194,9 +194,9 @@ def prompt_interactive(args: argparse.Namespace) -> None:
 
     if getattr(args, "manager_mode", False):
         if args.wifi_ssid is None:
-            args.wifi_ssid = prompt_text("Wi-Fi SSID")
+            args.wifi_ssid = prompt_text("Wi-Fi SSID (blank = configure by SoftAP)")
         if args.wifi_password is None:
-            args.wifi_password = prompt_secret("Wi-Fi password")
+            args.wifi_password = prompt_secret("Wi-Fi password (blank = configure by SoftAP)")
         if args.enrollment_key is None:
             args.enrollment_key = prompt_secret("Receiver enrollment key")
         return

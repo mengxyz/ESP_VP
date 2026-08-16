@@ -1,4 +1,4 @@
-FROM node:22-alpine AS ui-builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui-builder
 
 WORKDIR /app/esp-vp/ui
 RUN corepack enable

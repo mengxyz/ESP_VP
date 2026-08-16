@@ -36,6 +36,43 @@ static bool has_valid_auth(const char *request)
     return false;
 }
 
+static bool json_string_value(const char *json, const char *key, char *out, size_t out_len)
+{
+    if (json == NULL || key == NULL || out == NULL || out_len == 0) {
+        return false;
+    }
+    char pattern[48];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *p = strstr(json, pattern);
+    if (p == NULL) {
+        out[0] = '\0';
+        return false;
+    }
+    p = strchr(p + strlen(pattern), ':');
+    if (p == NULL) {
+        out[0] = '\0';
+        return false;
+    }
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    if (*p != '"') {
+        out[0] = '\0';
+        return false;
+    }
+    p++;
+    size_t written = 0;
+    while (*p != '\0' && *p != '"' && written + 1 < out_len) {
+        if (*p == '\\' && p[1] != '\0') {
+            p++;
+        }
+        out[written++] = *p++;
+    }
+    out[written] = '\0';
+    return *p == '"';
+}
+
 static void send_response(int client, int status, const char *reason, const char *body)
 {
     char headers[256];
@@ -54,10 +91,11 @@ static void send_response(int client, int status, const char *reason, const char
 
 static void handle_info(int client)
 {
-    char body[1100];
+    char body[1250];
     int len = snprintf(body, sizeof(body),
                        "{\"status\":\"ok\",\"firmware\":\"%s\",\"manager_mode\":%s,"
                        "\"configured\":%s,\"paired\":%s,\"pair_ready\":%s,\"pair_remaining_seconds\":%d,"
+                       "\"softap_active\":%s,\"softap_ssid\":\"%s\","
                        "\"device_id\":\"%s\","
                        "\"name\":\"%s\",\"model_code\":\"%s\",\"product_name\":\"%s\","
                        "\"serial\":\"%s\",\"access_code\":\"%s\",\"led_brightness\":%u,\"upload_base_url\":\"%s\","
@@ -71,6 +109,8 @@ static void handle_info(int client)
                        esp_vp_is_paired() ? "true" : "false",
                        esp_vp_pair_ready() ? "true" : "false",
                        esp_vp_pair_remaining_seconds(),
+                       wifi_is_softap_active() ? "true" : "false",
+                       wifi_softap_ssid(),
                        esp_vp_device_id(),
                        esp_vp_name(),
                        esp_vp_model_code(),
@@ -91,6 +131,35 @@ static void handle_info(int client)
         return;
     }
     send_response(client, 200, "OK", body);
+}
+
+static void handle_wifi_config(int client, const char *request)
+{
+    const char *body = strstr(request, "\r\n\r\n");
+    if (body == NULL) {
+        send_response(client, 400, "Bad Request", "{\"detail\":\"missing JSON body\"}");
+        return;
+    }
+    body += 4;
+
+    char ssid[33] = "";
+    char password[65] = "";
+    if (!json_string_value(body, "ssid", ssid, sizeof(ssid)) || ssid[0] == '\0') {
+        send_response(client, 400, "Bad Request", "{\"detail\":\"ssid is required\"}");
+        return;
+    }
+    json_string_value(body, "password", password, sizeof(password));
+
+    esp_err_t err = wifi_save_sta_config(ssid, password);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to save Wi-Fi config: %s", esp_err_to_name(err));
+        send_response(client, 400, "Bad Request", "{\"detail\":\"failed to save Wi-Fi config\"}");
+        return;
+    }
+    ESP_LOGI(TAG, "Wi-Fi config saved from provisioning endpoint; rebooting");
+    send_response(client, 200, "OK", "{\"status\":\"saved\",\"rebooting\":true}");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
 }
 
 static void handle_pair(int client, const char *request)
@@ -268,6 +337,8 @@ static void management_client(int client)
 
     if (strncmp(request, "GET /api/v1/device/info ", 24) == 0) {
         handle_info(client);
+    } else if (strncmp(request, "POST /api/v1/wifi/config ", 25) == 0) {
+        handle_wifi_config(client, request);
     } else if (strncmp(request, "POST /api/v1/device/pair ", 25) == 0) {
         handle_pair(client, request);
     } else if (strncmp(request, "POST /api/v1/device/config ", 27) == 0) {
