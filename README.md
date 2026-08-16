@@ -352,12 +352,11 @@ In `Settings`:
    usually `http://<manager-lan-ip>:18081`.
 2. Set `Bambuddy URL` to the Bambuddy server URL.
 3. Choose forwarding mode:
-   - `library`: recommended default; API key is usually enough.
+   - `library`: usable now and recommended default; API key is usually enough.
    - `archive`: uploads directly to Archives; requires Bambuddy username/password
      or a user/admin bearer token. API keys can be rejected by Bambuddy archive
      routes.
-   - `proxy_status`: pair this ESP with a Bambuddy printer and let the ESP cache
-     printer status for slicer report calls.
+   - Other modes are experimental and not stable yet.
 4. Click `Test Host`. The result shows both Bambuddy host reachability and
    archive-capable user auth.
 
@@ -507,29 +506,24 @@ BAMBUDDY_URL=http://192.168.1.127:8000 \
 docker compose up -d --build
 ```
 
-With auth:
+Set the public receiver URL when the ESP should upload to a specific host/LAN
+address:
 
 ```bash
-BAMBUDDY_API_KEY=bb_xxx \
+BUDDY_RECV_PUBLIC_URL=http://192.168.1.127:8001 \
 docker compose up -d --build
 ```
 
-Archive mode with a user JWT:
+Most settings are configured in the VP Manager UI and persisted in the
+`buddy_recv_data` volume:
 
-```bash
-BUDDY_RECV_FORWARD_MODE=archive \
-BAMBUDDY_BEARER_TOKEN="eyJ..." \
-docker compose up -d --build
-```
-
-Archive mode with automatic login:
-
-```bash
-BUDDY_RECV_FORWARD_MODE=archive \
-BAMBUDDY_USERNAME=admin \
-BAMBUDDY_PASSWORD="your-password" \
-docker compose up -d --build
-```
+- Bambuddy API key
+- Bambuddy user/admin bearer token
+- Bambuddy username/password
+- Forward mode
+- Paired printer
+- Library folder
+- Max upload size
 
 With host networking, the receiver binds directly on the host. On Linux this is
 usually the simplest mode because `127.0.0.1:8000` inside the container points to
@@ -541,27 +535,28 @@ Useful receiver environment variables:
 
 ```text
 BUDDY_RECV_PORT=8001
+BUDDY_RECV_PUBLIC_URL=http://192.168.1.127:8001
 BAMBUDDY_URL=http://127.0.0.1:8000
-BAMBUDDY_API_KEY=
-BAMBUDDY_BEARER_TOKEN=
-BAMBUDDY_USERNAME=
-BAMBUDDY_PASSWORD=
-BUDDY_RECV_MAX_UPLOAD_BYTES=0
-BUDDY_RECV_PRINTER_ID=
-BUDDY_RECV_LIBRARY_FOLDER_ID=
-BUDDY_RECV_FORWARD_MODE=library
 ```
+
+Advanced settings still have CLI/env equivalents for non-interactive
+deployments, but the compose file intentionally leaves them out so secrets and
+per-device choices stay in the VP Manager data volume.
 
 Forward modes:
 
 ```text
-library  Upload to stock latest /api/v1/library/files. This is the default.
-auto     Try /api/v1/library/files, then fall back to /api/v1/archives/upload
-         only when no API key is configured.
-archive  Force the older /api/v1/archives/upload multipart API.
-         On latest stock Bambuddy with auth enabled, use BAMBUDDY_BEARER_TOKEN
-         instead of BAMBUDDY_API_KEY.
-esp-vp   Require the custom /api/v1/esp-vp/upload route.
+library  Stable. Upload to stock latest /api/v1/library/files. This is the default.
+archive  Stable enough for current use. Upload to /api/v1/archives/upload.
+         On latest stock Bambuddy with auth enabled, use a user/admin login or
+         bearer token instead of an API key.
+
+Experimental / not stable yet:
+auto
+immediate
+print_queue
+proxy_status
+esp-vp
 ```
 
 ## Protocol Surface
