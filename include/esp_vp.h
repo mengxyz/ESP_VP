@@ -33,7 +33,9 @@ typedef enum {
 } esp_vp_status_t;
 
 esp_err_t wifi_start(void);
+esp_err_t wifi_start_softap_provisioning(void);
 const char *wifi_local_ip(void);
+bool wifi_is_connected(void);
 bool wifi_is_softap_active(void);
 const char *wifi_softap_ssid(void);
 esp_err_t wifi_save_sta_config(const char *ssid, const char *password);

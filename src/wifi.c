@@ -18,7 +18,9 @@ static const int WIFI_FAILED_BIT = BIT2;
 static const int WIFI_MAX_RETRIES = 10;
 static char s_local_ip[16] = "0.0.0.0";
 static char s_softap_ssid[33] = "";
+static bool s_sta_connected = false;
 static bool s_softap_active = false;
+static bool s_wifi_started = false;
 static int s_retry_count = 0;
 
 static bool has_sta_ssid(const char *ssid)
@@ -78,16 +80,41 @@ bool wifi_is_softap_active(void)
     return s_softap_active;
 }
 
+bool wifi_is_connected(void)
+{
+    return s_sta_connected;
+}
+
 const char *wifi_softap_ssid(void)
 {
     return s_softap_ssid;
 }
 
-static void start_softap(bool keep_sta)
+static void limit_wifi_tx_power(void)
+{
+    esp_err_t tx_power_err = esp_wifi_set_max_tx_power(40); /* 10 dBm, lowest ESP-IDF v6 config value. */
+    if (tx_power_err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to limit TX power: %s", esp_err_to_name(tx_power_err));
+    }
+}
+
+static void configure_low_power_ap_phy(void)
+{
+    esp_err_t err = esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to force low-rate SoftAP protocol: %s", esp_err_to_name(err));
+    }
+    err = esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW20);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to force SoftAP HT20 bandwidth: %s", esp_err_to_name(err));
+    }
+}
+
+static esp_err_t start_softap(bool keep_sta)
 {
     if (s_softap_active) {
         xEventGroupSetBits(s_wifi_events, WIFI_SOFTAP_BIT);
-        return;
+        return ESP_OK;
     }
 
     uint8_t mac[6] = {0};
@@ -99,17 +126,34 @@ static void start_softap(bool keep_sta)
     ap_config.ap.ssid_len = strlen(s_softap_ssid);
     ap_config.ap.password[0] = '\0';
     ap_config.ap.channel = 6;
-    ap_config.ap.max_connection = 4;
+    ap_config.ap.max_connection = 1;
     ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    ap_config.ap.beacon_interval = 1000;
     ap_config.ap.pmf_cfg.required = false;
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(keep_sta ? WIFI_MODE_APSTA : WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    esp_err_t err = esp_wifi_set_mode(keep_sta ? WIFI_MODE_APSTA : WIFI_MODE_AP);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    configure_low_power_ap_phy();
+    if (!s_wifi_started) {
+        err = esp_wifi_start();
+        if (err != ESP_OK) {
+            return err;
+        }
+        s_wifi_started = true;
+    }
+    limit_wifi_tx_power();
     s_softap_active = true;
     strlcpy(s_local_ip, "192.168.4.1", sizeof(s_local_ip));
     status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
     ESP_LOGW(TAG, "STA not connected; open SoftAP provisioning active ssid=\"%s\" url=http://192.168.4.1:%d", s_softap_ssid, ESP_VP_MANAGEMENT_PORT);
     xEventGroupSetBits(s_wifi_events, WIFI_SOFTAP_BIT);
+    return ESP_OK;
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
@@ -118,12 +162,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_sta_connected = false;
+        strlcpy(s_local_ip, s_softap_active ? "192.168.4.1" : "0.0.0.0", sizeof(s_local_ip));
         s_retry_count++;
         ESP_LOGW(TAG, "disconnected, reconnecting attempt=%d/%d", s_retry_count, WIFI_MAX_RETRIES);
         status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
         if (s_retry_count >= WIFI_MAX_RETRIES) {
             xEventGroupSetBits(s_wifi_events, WIFI_FAILED_BIT);
-            start_softap(true);
+            esp_err_t err = start_softap(true);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to start SoftAP provisioning: %s", esp_err_to_name(err));
+            }
         } else {
             esp_wifi_connect();
         }
@@ -131,6 +180,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_retry_count = 0;
         snprintf(s_local_ip, sizeof(s_local_ip), IPSTR, IP2STR(&event->ip_info.ip));
+        s_sta_connected = true;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&event->ip_info.ip));
         status_led_set(ESP_VP_STATUS_READY);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
@@ -140,6 +190,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 const char *wifi_local_ip(void)
 {
     return s_local_ip;
+}
+
+esp_err_t wifi_start_softap_provisioning(void)
+{
+    if (s_wifi_events == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGW(TAG, "starting SoftAP provisioning by user request");
+    return start_softap(false);
 }
 
 esp_err_t wifi_start(void)
@@ -159,16 +218,9 @@ esp_err_t wifi_start(void)
     char password[65] = "";
     load_sta_config(ssid, sizeof(ssid), password, sizeof(password));
 
-    esp_err_t tx_power_err = esp_wifi_set_max_tx_power(52); /* 13 dBm, lower peak current during association. */
-    if (tx_power_err != ESP_OK) {
-        ESP_LOGW(TAG, "failed to limit TX power: %s", esp_err_to_name(tx_power_err));
-    }
-
     if (!has_sta_ssid(ssid)) {
-        ESP_LOGW(TAG, "no Wi-Fi SSID configured; starting SoftAP provisioning");
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-        ESP_ERROR_CHECK(esp_wifi_start());
-        start_softap(false);
+        ESP_LOGW(TAG, "no Wi-Fi SSID configured; hold BOOT for 5 seconds to start SoftAP provisioning");
+        status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
         return ESP_OK;
     }
 
@@ -181,6 +233,8 @@ esp_err_t wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    s_wifi_started = true;
+    limit_wifi_tx_power();
 
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_events,
@@ -193,7 +247,10 @@ esp_err_t wifi_start(void)
     }
     if (!(bits & WIFI_SOFTAP_BIT)) {
         ESP_LOGW(TAG, "Wi-Fi connection timed out; starting SoftAP provisioning");
-        start_softap(true);
+        esp_err_t err = start_softap(true);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "failed to start SoftAP provisioning: %s", esp_err_to_name(err));
+        }
     }
     return ESP_OK;
 }

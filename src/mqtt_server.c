@@ -16,6 +16,46 @@
 
 static const char *TAG = "mqtt";
 static volatile int s_active_mqtt_clients = 0;
+static volatile int s_active_mqtt_fd = -1;
+static volatile uint32_t s_active_mqtt_generation = 0;
+
+#define MQTT_SOCKET_TIMEOUT_SECONDS 45
+
+typedef struct {
+    int client;
+    uint32_t generation;
+} mqtt_client_arg_t;
+
+static void set_socket_timeouts(int sock)
+{
+    struct timeval timeout = {
+        .tv_sec = MQTT_SOCKET_TIMEOUT_SECONDS,
+        .tv_usec = 0,
+    };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+}
+
+static void kick_active_mqtt_client(const char *peer)
+{
+    int fd = s_active_mqtt_fd;
+    if (fd >= 0) {
+        ESP_LOGW(TAG, "kicking active MQTT client for new client from %s active=%d", peer, s_active_mqtt_clients);
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+    }
+}
+
+static void mqtt_active_client_done(uint32_t generation)
+{
+    if (generation == s_active_mqtt_generation) {
+        s_active_mqtt_clients = 0;
+        s_active_mqtt_fd = -1;
+    }
+    ESP_LOGI(TAG, "client disconnected active=%d", s_active_mqtt_clients);
+}
 
 static int read_remaining_length(tls_socket_t *client)
 {
@@ -252,13 +292,16 @@ static void handle_publish(tls_socket_t *client, unsigned char header, const uns
 
 static void mqtt_client_task(void *arg)
 {
-    int client = (int)(intptr_t)arg;
+    mqtt_client_arg_t *client_arg = (mqtt_client_arg_t *)arg;
+    int client = client_arg->client;
+    uint32_t generation = client_arg->generation;
+    free(client_arg);
+
+    set_socket_timeouts(client);
     tls_socket_t *sock = calloc(1, sizeof(*sock));
     if (sock == NULL) {
         close(client);
-        if (s_active_mqtt_clients > 0) {
-            s_active_mqtt_clients--;
-        }
+        mqtt_active_client_done(generation);
         vTaskDelete(NULL);
         return;
     }
@@ -266,9 +309,7 @@ static void mqtt_client_task(void *arg)
         ESP_LOGW(TAG, "mqtt TLS/session init failed");
         close(client);
         free(sock);
-        if (s_active_mqtt_clients > 0) {
-            s_active_mqtt_clients--;
-        }
+        mqtt_active_client_done(generation);
         vTaskDelete(NULL);
         return;
     }
@@ -287,9 +328,7 @@ static void mqtt_client_task(void *arg)
                 ESP_LOGW(TAG, "mqtt CONNECT short read: got=%d expected=%d", got, remaining);
                 tls_socket_close(sock);
                 free(sock);
-                if (s_active_mqtt_clients > 0) {
-                    s_active_mqtt_clients--;
-                }
+                mqtt_active_client_done(generation);
                 vTaskDelete(NULL);
                 return;
             }
@@ -345,9 +384,7 @@ static void mqtt_client_task(void *arg)
                 ESP_LOGW(TAG, "client auth failed");
                 tls_socket_close(sock);
                 free(sock);
-                if (s_active_mqtt_clients > 0) {
-                    s_active_mqtt_clients--;
-                }
+                mqtt_active_client_done(generation);
                 vTaskDelete(NULL);
                 return;
             }
@@ -390,10 +427,7 @@ static void mqtt_client_task(void *arg)
     }
     tls_socket_close(sock);
     free(sock);
-    if (s_active_mqtt_clients > 0) {
-        s_active_mqtt_clients--;
-    }
-    ESP_LOGI(TAG, "client disconnected active=%d", s_active_mqtt_clients);
+    mqtt_active_client_done(generation);
     vTaskDelete(NULL);
 }
 
@@ -419,19 +453,31 @@ static void mqtt_task(void *arg)
         socklen_t peer_len = sizeof(peer);
         int client = accept(listener, (struct sockaddr *)&peer, &peer_len);
         if (client >= 0) {
+            set_socket_timeouts(client);
             if (s_active_mqtt_clients >= 1) {
-                ESP_LOGW(TAG, "rejecting extra MQTT client from %s active=%d", inet_ntoa(peer.sin_addr), s_active_mqtt_clients);
+                kick_active_mqtt_client(inet_ntoa(peer.sin_addr));
+            }
+
+            mqtt_client_arg_t *client_arg = calloc(1, sizeof(*client_arg));
+            if (client_arg == NULL) {
+                ESP_LOGW(TAG, "no memory for MQTT client arg");
                 close(client);
                 continue;
             }
-            s_active_mqtt_clients++;
+
+            s_active_mqtt_clients = 1;
+            s_active_mqtt_fd = client;
+            s_active_mqtt_generation++;
+            client_arg->client = client;
+            client_arg->generation = s_active_mqtt_generation;
             esp_vp_diag_record_mqtt_accept();
             ESP_LOGI(TAG, "accepted TCP/%d from %s", ESP_VP_MQTT_PORT, inet_ntoa(peer.sin_addr));
             status_led_pulse(ESP_VP_STATUS_CLIENT_ACTIVE, 900);
-            BaseType_t created = xTaskCreate(mqtt_client_task, "mqtt_client", 8192, (void *)(intptr_t)client, 5, NULL);
+            BaseType_t created = xTaskCreate(mqtt_client_task, "mqtt_client", 8192, client_arg, 5, NULL);
             if (created != pdPASS) {
-                s_active_mqtt_clients--;
+                mqtt_active_client_done(client_arg->generation);
                 close(client);
+                free(client_arg);
                 ESP_LOGW(TAG, "failed to create MQTT client task");
             }
         }

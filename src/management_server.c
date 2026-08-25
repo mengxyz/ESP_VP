@@ -89,6 +89,51 @@ static void send_response(int client, int status, const char *reason, const char
     }
 }
 
+static void send_html_response(int client, const char *body)
+{
+    char headers[256];
+    int body_len = body ? strlen(body) : 0;
+    int len = snprintf(headers, sizeof(headers),
+                       "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: text/html; charset=utf-8\r\n"
+                       "Content-Length: %d\r\n"
+                       "Connection: close\r\n\r\n",
+                       body_len);
+    send(client, headers, len, 0);
+    if (body_len > 0) {
+        send(client, body, body_len, 0);
+    }
+}
+
+static void handle_provisioning_page(int client)
+{
+    static const char page[] =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>ESP VP Wi-Fi</title>"
+        "<style>"
+        ":root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}"
+        "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111827;color:#f9fafb}"
+        "main{width:min(92vw,380px);padding:24px;border:1px solid #374151;border-radius:12px;background:#1f2937}"
+        "h1{margin:0 0 18px;font-size:22px}label{display:block;margin:14px 0 6px;color:#d1d5db}"
+        "input,button{box-sizing:border-box;width:100%;font:inherit;border-radius:8px}"
+        "input{padding:11px;border:1px solid #4b5563;background:#111827;color:#f9fafb}"
+        "button{margin-top:18px;padding:12px;border:0;background:#22c55e;color:#052e16;font-weight:700}"
+        "p{min-height:22px;color:#d1d5db}.err{color:#fca5a5}"
+        "</style></head><body><main><h1>ESP VP Wi-Fi</h1>"
+        "<form id=\"f\"><label>Wi-Fi SSID</label><input id=\"s\" maxlength=\"32\" required autofocus>"
+        "<label>Password</label><input id=\"p\" maxlength=\"64\" type=\"password\">"
+        "<button>Save and reboot</button><p id=\"m\"></p></form></main>"
+        "<script>"
+        "f.onsubmit=async e=>{e.preventDefault();m.className='';m.textContent='Saving...';"
+        "try{let r=await fetch('/api/v1/wifi/config',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({ssid:s.value,password:p.value})});let j=await r.json();"
+        "if(!r.ok)throw Error(j.detail||'Save failed');m.textContent='Saved. ESP is rebooting.'}"
+        "catch(x){m.className='err';m.textContent=x.message}}"
+        "</script></body></html>";
+    send_html_response(client, page);
+}
+
 static void handle_info(int client)
 {
     char body[1250];
@@ -335,7 +380,9 @@ static void management_client(int client)
     }
     request[total] = '\0';
 
-    if (strncmp(request, "GET /api/v1/device/info ", 24) == 0) {
+    if (strncmp(request, "GET / ", 6) == 0 || strncmp(request, "GET /wifi ", 10) == 0) {
+        handle_provisioning_page(client);
+    } else if (strncmp(request, "GET /api/v1/device/info ", 24) == 0) {
         handle_info(client);
     } else if (strncmp(request, "POST /api/v1/wifi/config ", 25) == 0) {
         handle_wifi_config(client, request);

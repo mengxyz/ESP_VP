@@ -13,6 +13,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,6 +24,13 @@
 
 static const char *TAG = "ftps";
 static int s_next_passive_port = ESP_VP_FTPS_PASSIVE_PORT;
+static volatile bool s_upload_active = false;
+static volatile int64_t s_upload_last_progress_us = 0;
+static volatile size_t s_upload_last_bytes = 0;
+static char s_upload_filename[128] = "";
+
+#define FTP_SOCKET_TIMEOUT_SECONDS 35
+#define UPLOAD_STALL_RESTART_US 90000000LL
 
 typedef struct {
     tls_socket_t control;
@@ -30,6 +38,38 @@ typedef struct {
     int passive_listener;
     int passive_port;
 } ftp_session_t;
+
+static void set_socket_timeouts(int sock)
+{
+    struct timeval timeout = {
+        .tv_sec = FTP_SOCKET_TIMEOUT_SECONDS,
+        .tv_usec = 0,
+    };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+
+static void upload_watchdog_start(const char *filename)
+{
+    strlcpy(s_upload_filename, filename ? filename : "", sizeof(s_upload_filename));
+    s_upload_last_bytes = 0;
+    s_upload_last_progress_us = esp_timer_get_time();
+    s_upload_active = true;
+}
+
+static void upload_watchdog_progress(size_t bytes)
+{
+    s_upload_last_bytes = bytes;
+    s_upload_last_progress_us = esp_timer_get_time();
+}
+
+static void upload_watchdog_stop(void)
+{
+    s_upload_active = false;
+    s_upload_last_progress_us = 0;
+    s_upload_last_bytes = 0;
+    s_upload_filename[0] = '\0';
+}
 
 static void ftp_send(tls_socket_t *sock, int code, const char *message)
 {
@@ -174,6 +214,7 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     if (getpeername(data_fd, (struct sockaddr *)&data_peer, &data_peer_len) != 0) {
         memset(&data_peer, 0, sizeof(data_peer));
     }
+    set_socket_timeouts(data_fd);
     close_passive(session);
     tls_socket_t *data = calloc(1, sizeof(*data));
     if (data == NULL) {
@@ -193,9 +234,11 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     stream_upload_t upload;
     memset(&upload, 0, sizeof(upload));
     if (archive_upload) {
+        upload_watchdog_start(filename);
         status_led_set(ESP_VP_STATUS_UPLOADING);
         esp_err_t begin_err = stream_upload_begin(&upload, filename, session->source_ip);
         if (begin_err != ESP_OK) {
+            upload_watchdog_stop();
             status_led_set(ESP_VP_STATUS_READY);
             status_led_pulse(ESP_VP_STATUS_ERROR, 1600);
             tls_socket_close(data);
@@ -214,6 +257,9 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
         buffer = malloc(buffer_len);
     }
     if (buffer == NULL) {
+        if (archive_upload) {
+            upload_watchdog_stop();
+        }
         stream_upload_abort(&upload);
         tls_socket_close(data);
         free(data);
@@ -222,6 +268,9 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     }
 
     size_t total_received = 0;
+    if (archive_upload) {
+        upload_watchdog_progress(total_received);
+    }
     while (true) {
         int got = tls_socket_read(data, buffer, buffer_len);
         if (got == 0) {
@@ -232,6 +281,9 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
             break;
         }
         total_received += got;
+        if (archive_upload) {
+            upload_watchdog_progress(total_received);
+        }
         if (archive_upload) {
             err = stream_upload_write(&upload, buffer, got);
             if (err != ESP_OK) {
@@ -245,11 +297,13 @@ static esp_err_t relay_stor_data(ftp_session_t *session, const char *filename)
     free(data);
 
     if (archive_upload && err == ESP_OK) {
+        upload_watchdog_progress(total_received);
         err = stream_upload_finish(&upload);
     } else if (archive_upload) {
         stream_upload_abort(&upload);
     }
     if (archive_upload) {
+        upload_watchdog_stop();
         status_led_set(ESP_VP_STATUS_READY);
         if (err == ESP_OK) {
             esp_vp_diag_record_upload_success();
@@ -283,6 +337,7 @@ static void ftp_client_task(void *arg)
     if (getpeername(control_fd, (struct sockaddr *)&peer, &peer_len) == 0) {
         strlcpy(session->source_ip, inet_ntoa(peer.sin_addr), sizeof(session->source_ip));
     }
+    set_socket_timeouts(control_fd);
     if (tls_socket_init(&session->control, control_fd, true) != ESP_OK) {
         close(control_fd);
         free(session);
@@ -359,6 +414,26 @@ static void ftp_client_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static void ftps_upload_watchdog_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        if (s_upload_active) {
+            int64_t last_progress = s_upload_last_progress_us;
+            int64_t idle_us = esp_timer_get_time() - last_progress;
+            if (last_progress > 0 && idle_us > UPLOAD_STALL_RESTART_US) {
+                ESP_LOGE(TAG,
+                         "upload watchdog restart: filename=%s bytes=%u idle_ms=%u",
+                         s_upload_filename,
+                         (unsigned)s_upload_last_bytes,
+                         (unsigned)(idle_us / 1000));
+                esp_restart();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
 static void ftps_task(void *arg)
 {
     int listener = make_listener(ESP_VP_FTPS_PORT, 2);
@@ -382,5 +457,6 @@ static void ftps_task(void *arg)
 
 void ftps_server_start(void)
 {
+    xTaskCreate(ftps_upload_watchdog_task, "ftps_upload_wd", 4096, NULL, 6, NULL);
     xTaskCreate(ftps_task, "ftps", 8192, NULL, 5, NULL);
 }

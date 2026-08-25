@@ -40,9 +40,18 @@ static void pair_button_task(void *arg)
         if (pressed) {
             held_ms += 100;
             if (armed && held_ms >= 5000) {
-                s_pair_until = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
-                status_led_set(ESP_VP_STATUS_PAIRING);
-                ESP_LOGI(TAG, "pair mode enabled for 120 seconds");
+                if (wifi_is_connected()) {
+                    s_pair_until = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
+                    status_led_set(ESP_VP_STATUS_PAIRING);
+                    ESP_LOGI(TAG, "pair mode enabled for 120 seconds");
+                } else {
+                    esp_err_t err = wifi_start_softap_provisioning();
+                    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+                        ESP_LOGW(TAG, "SoftAP provisioning start failed: %s", esp_err_to_name(err));
+                    } else {
+                        ESP_LOGI(TAG, "SoftAP provisioning enabled ssid=\"%s\"", wifi_softap_ssid());
+                    }
+                }
                 armed = false;
             }
         } else {

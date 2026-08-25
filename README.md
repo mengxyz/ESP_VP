@@ -489,6 +489,10 @@ Troubleshooting:
 - Archive upload fails with Bambuddy login `401`: the Bambuddy username/password
   in VP Manager is wrong, uses an unsupported auth flow, or needs 2FA. Use a
   valid local service user or a current user/admin bearer token.
+- Upload hangs and the ESP does not recover: current firmware has an upload
+  watchdog. If an FTPS upload is active but no data, socket write, or manager
+  response progress happens for 90 seconds, the ESP logs
+  `upload watchdog restart` and reboots itself.
 
 Docker option:
 
