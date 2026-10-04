@@ -13,3 +13,6 @@ __pycache__/
 vp_cert
 ui/node_modules/
 ui/dist/
+flasher/node_modules/
+flasher/dist/
+flasher/public/
