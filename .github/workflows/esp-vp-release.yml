@@ -1,0 +1,208 @@
+name: ESP VP Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag and firmware version, for example v0.1.0 or 0020-wifi-self-recovery"
+        required: true
+      models:
+        description: "Comma-separated model codes/names, for example P1S,X2D,A1 or all"
+        required: true
+        default: "P1S"
+      receiver_url:
+        description: "Default VP Manager receiver URL embedded in manager-mode firmware"
+        required: true
+        default: "http://192.168.1.127:18081"
+      status_led_pin:
+        description: "ARGB/WS2812 status LED GPIO; -1 disables LED"
+        required: true
+        default: "1"
+      latest:
+        description: "Also move the Docker latest tag"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/esp-vp-manager
+
+jobs:
+  firmware:
+    name: Build firmware
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v6.0
+
+    env:
+      VERSION: ${{ inputs.version }}
+      MODELS: ${{ inputs.models }}
+      RECEIVER_URL: ${{ inputs.receiver_url }}
+      STATUS_LED_PIN: ${{ inputs.status_led_pin }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build manager-mode firmware
+        shell: bash
+        run: |
+          python3 build.py \
+            --model "${MODELS}" \
+            --manager-mode \
+            --status-led-pin "${STATUS_LED_PIN}" \
+            --receiver-url "${RECEIVER_URL}" \
+            --firmware-version "${VERSION}" \
+            --wifi-ssid "" \
+            --wifi-password "" \
+            --idf-path "${IDF_PATH}" \
+            --no-idf-bootstrap
+
+      - name: Package firmware
+        shell: bash
+        run: |
+          find out -maxdepth 3 -type f -print0 | sort -z | xargs -0 sha256sum > "SHA256SUMS-${VERSION}.txt"
+          python3 - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          zip_path = Path(f"esp-vp-firmware-{version}.zip")
+          with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(Path("out").rglob("*")):
+                  if path.is_file():
+                      archive.write(path, path.as_posix())
+          PY
+
+      - name: Upload firmware build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp-vp-firmware-${{ inputs.version }}
+          path: |
+            esp-vp-firmware-${{ inputs.version }}.zip
+            SHA256SUMS-${{ inputs.version }}.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  docker:
+    name: Build Docker image ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare metadata
+        shell: bash
+        run: |
+          IMAGE="${IMAGE_NAME,,}"
+          VERSION="${{ inputs.version }}"
+          SAFE_VERSION="${VERSION//\//-}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          echo "SAFE_VERSION=${SAFE_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push architecture image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.SAFE_VERSION }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+
+  docker-manifest:
+    name: Publish Docker manifest
+    runs-on: ubuntu-latest
+    needs: docker
+
+    steps:
+      - name: Prepare metadata
+        shell: bash
+        run: |
+          IMAGE="${IMAGE_NAME,,}"
+          VERSION="${{ inputs.version }}"
+          SAFE_VERSION="${VERSION//\//-}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          echo "SAFE_VERSION=${SAFE_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create version manifest
+        shell: bash
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE}:${SAFE_VERSION}" \
+            "${IMAGE}:${SAFE_VERSION}-amd64" \
+            "${IMAGE}:${SAFE_VERSION}-arm64"
+
+      - name: Move latest tag
+        if: ${{ inputs.latest }}
+        shell: bash
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE}:latest" \
+            "${IMAGE}:${SAFE_VERSION}-amd64" \
+            "${IMAGE}:${SAFE_VERSION}-arm64"
+
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - firmware
+      - docker-manifest
+
+    steps:
+      - name: Download firmware assets
+        uses: actions/download-artifact@v4
+        with:
+          name: esp-vp-firmware-${{ inputs.version }}
+          path: release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: ESP VP ${{ inputs.version }}
+          generate_release_notes: true
+          make_latest: ${{ inputs.latest }}
+          files: |
+            release-assets/esp-vp-firmware-${{ inputs.version }}.zip
+            release-assets/SHA256SUMS-${{ inputs.version }}.txt
