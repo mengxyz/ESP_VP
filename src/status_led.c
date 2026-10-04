@@ -159,3 +159,31 @@ void status_led_pulse(esp_vp_status_t status, uint32_t duration_ms)
     s_pulse_status = status;
     s_pulse_until = xTaskGetTickCount() + pdMS_TO_TICKS(duration_ms);
 }
+
+esp_vp_status_t status_led_current(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    return now < s_pulse_until ? s_pulse_status : s_status;
+}
+
+const char *status_led_status_name(esp_vp_status_t status)
+{
+    switch (status) {
+    case ESP_VP_STATUS_BOOT:
+        return "boot";
+    case ESP_VP_STATUS_WIFI_CONNECTING:
+        return "wifi_connecting";
+    case ESP_VP_STATUS_READY:
+        return "ready";
+    case ESP_VP_STATUS_CLIENT_ACTIVE:
+        return "client_active";
+    case ESP_VP_STATUS_UPLOADING:
+        return "uploading";
+    case ESP_VP_STATUS_PAIRING:
+        return "pairing";
+    case ESP_VP_STATUS_ERROR:
+        return "error";
+    default:
+        return "unknown";
+    }
+}

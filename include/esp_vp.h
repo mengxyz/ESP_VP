@@ -61,6 +61,8 @@ esp_err_t esp_vp_apply_config_json(const char *json);
 void status_led_init(void);
 void status_led_set(esp_vp_status_t status);
 void status_led_pulse(esp_vp_status_t status, uint32_t duration_ms);
+esp_vp_status_t status_led_current(void);
+const char *status_led_status_name(esp_vp_status_t status);
 const char *esp_vp_upload_base_url(void);
 void esp_vp_set_upload_base_url(const char *url);
 esp_err_t esp_vp_pair_json(const char *json);

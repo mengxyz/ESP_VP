@@ -1,12 +1,15 @@
 #include <string.h>
+#include <inttypes.h>
 
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 
 #include "esp_vp.h"
 
@@ -16,12 +19,20 @@ static const int WIFI_CONNECTED_BIT = BIT0;
 static const int WIFI_SOFTAP_BIT = BIT1;
 static const int WIFI_FAILED_BIT = BIT2;
 static const int WIFI_MAX_RETRIES = 10;
+static const int WIFI_RECOVERY_CHECK_MS = 5000;
+static const int WIFI_RECOVERY_RECONNECT_MS = 15000;
+static const int WIFI_RECOVERY_RESTART_MS = 180000;
+static const int WIFI_RECOVERY_SOFTAP_RESTART_MS = 600000;
 static char s_local_ip[16] = "0.0.0.0";
 static char s_softap_ssid[33] = "";
 static bool s_sta_connected = false;
 static bool s_softap_active = false;
 static bool s_wifi_started = false;
+static bool s_has_sta_config = false;
+static bool s_recovery_task_started = false;
 static int s_retry_count = 0;
+static TickType_t s_disconnected_since = 0;
+static TickType_t s_last_reconnect_poke = 0;
 
 static bool has_sta_ssid(const char *ssid)
 {
@@ -110,6 +121,60 @@ static void configure_low_power_ap_phy(void)
     }
 }
 
+static void wifi_recovery_task(void *arg)
+{
+    (void)arg;
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RECOVERY_CHECK_MS));
+
+        if (!s_has_sta_config) {
+            continue;
+        }
+
+        TickType_t now = xTaskGetTickCount();
+        if (s_sta_connected) {
+            s_disconnected_since = 0;
+            continue;
+        }
+
+        if (s_disconnected_since == 0) {
+            s_disconnected_since = now;
+        }
+
+        if (s_wifi_started && (s_last_reconnect_poke == 0 || now - s_last_reconnect_poke >= pdMS_TO_TICKS(WIFI_RECOVERY_RECONNECT_MS))) {
+            s_last_reconnect_poke = now;
+            ESP_LOGW(TAG, "Wi-Fi recovery reconnect poke ip=%s softap=%d retries=%d", s_local_ip, s_softap_active, s_retry_count);
+            esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
+                ESP_LOGW(TAG, "Wi-Fi recovery reconnect poke failed: %s", esp_err_to_name(err));
+            }
+        }
+
+        TickType_t restart_after = s_softap_active ? pdMS_TO_TICKS(WIFI_RECOVERY_SOFTAP_RESTART_MS) : pdMS_TO_TICKS(WIFI_RECOVERY_RESTART_MS);
+        if (now - s_disconnected_since >= restart_after) {
+            uint32_t disconnected_ms = (uint32_t)((now - s_disconnected_since) * portTICK_PERIOD_MS);
+            ESP_LOGE(TAG, "Wi-Fi recovery restart after %" PRIu32 " ms disconnected ip=%s softap=%d retries=%d", disconnected_ms, s_local_ip, s_softap_active, s_retry_count);
+            status_led_set(ESP_VP_STATUS_ERROR);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
+        }
+    }
+}
+
+static void start_wifi_recovery_task(void)
+{
+    if (s_recovery_task_started) {
+        return;
+    }
+    BaseType_t created = xTaskCreate(wifi_recovery_task, "wifi_recovery", 3072, NULL, 4, NULL);
+    if (created == pdPASS) {
+        s_recovery_task_started = true;
+    } else {
+        ESP_LOGE(TAG, "failed to start Wi-Fi recovery task");
+    }
+}
+
 static esp_err_t start_softap(bool keep_sta)
 {
     if (s_softap_active) {
@@ -160,9 +225,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
+        if (s_disconnected_since == 0) {
+            s_disconnected_since = xTaskGetTickCount();
+        }
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_connected = false;
+        if (s_disconnected_since == 0) {
+            s_disconnected_since = xTaskGetTickCount();
+        }
         strlcpy(s_local_ip, s_softap_active ? "192.168.4.1" : "0.0.0.0", sizeof(s_local_ip));
         s_retry_count++;
         ESP_LOGW(TAG, "disconnected, reconnecting attempt=%d/%d", s_retry_count, WIFI_MAX_RETRIES);
@@ -179,6 +250,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         s_retry_count = 0;
+        s_disconnected_since = 0;
+        s_last_reconnect_poke = 0;
         snprintf(s_local_ip, sizeof(s_local_ip), IPSTR, IP2STR(&event->ip_info.ip));
         s_sta_connected = true;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&event->ip_info.ip));
@@ -217,8 +290,9 @@ esp_err_t wifi_start(void)
     char ssid[33] = "";
     char password[65] = "";
     load_sta_config(ssid, sizeof(ssid), password, sizeof(password));
+    s_has_sta_config = has_sta_ssid(ssid);
 
-    if (!has_sta_ssid(ssid)) {
+    if (!s_has_sta_config) {
         ESP_LOGW(TAG, "no Wi-Fi SSID configured; hold BOOT for 5 seconds to start SoftAP provisioning");
         status_led_set(ESP_VP_STATUS_WIFI_CONNECTING);
         return ESP_OK;
@@ -234,6 +308,8 @@ esp_err_t wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     s_wifi_started = true;
+    s_disconnected_since = xTaskGetTickCount();
+    start_wifi_recovery_task();
     limit_wifi_tx_power();
 
     EventBits_t bits = xEventGroupWaitBits(

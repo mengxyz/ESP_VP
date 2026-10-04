@@ -136,11 +136,13 @@ static void handle_provisioning_page(int client)
 
 static void handle_info(int client)
 {
-    char body[1250];
+    char body[1500];
+    esp_vp_status_t led_status = status_led_current();
     int len = snprintf(body, sizeof(body),
                        "{\"status\":\"ok\",\"firmware\":\"%s\",\"manager_mode\":%s,"
                        "\"configured\":%s,\"paired\":%s,\"pair_ready\":%s,\"pair_remaining_seconds\":%d,"
-                       "\"softap_active\":%s,\"softap_ssid\":\"%s\","
+                       "\"wifi_connected\":%s,\"softap_active\":%s,\"softap_ssid\":\"%s\","
+                       "\"led_status\":\"%s\","
                        "\"device_id\":\"%s\","
                        "\"name\":\"%s\",\"model_code\":\"%s\",\"product_name\":\"%s\","
                        "\"serial\":\"%s\",\"access_code\":\"%s\",\"led_brightness\":%u,\"upload_base_url\":\"%s\","
@@ -154,8 +156,10 @@ static void handle_info(int client)
                        esp_vp_is_paired() ? "true" : "false",
                        esp_vp_pair_ready() ? "true" : "false",
                        esp_vp_pair_remaining_seconds(),
+                       wifi_is_connected() ? "true" : "false",
                        wifi_is_softap_active() ? "true" : "false",
                        wifi_softap_ssid(),
+                       status_led_status_name(led_status),
                        esp_vp_device_id(),
                        esp_vp_name(),
                        esp_vp_model_code(),
