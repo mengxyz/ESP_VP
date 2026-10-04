@@ -43,7 +43,7 @@
   }
 
   function addLog(message: string): void {
-    const clean = message.trimEnd();
+    const clean = message.replace(/\s+$/, "");
     if (clean) logs = [...logs.slice(-199), clean];
   }
 
